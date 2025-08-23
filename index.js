@@ -1,64 +1,75 @@
-import http from "node:http";
-import next from "next";
-import morgan from "morgan";
-import { WebSocketServer } from "ws";
+// index.js
+const http = require('http');
+const next = require('next');
+const { WebSocketServer } = require('ws');
+const { URL } = require('url');
 
-const dev = process.env.NODE_ENV !== "production";
-const port = process.env.PORT || 10000;
-
-const app = next({ dev, dir: "." });
+const dev = process.env.NODE_ENV !== 'production';
+const app = next({ dev });
 const handle = app.getRequestHandler();
 
-// --- WS servers (path-scoped via manual upgrade) ---
-const wssEcho = new WebSocketServer({ noServer: true });
-const wssPing = new WebSocketServer({ noServer: true });
-const wssDemo = new WebSocketServer({ noServer: true });
+const PORT = process.env.PORT || 10000;
 
-wssEcho.on("connection", (ws) => {
-  ws.once("message", (data, isBinary) => {
-    ws.send(data, { binary: isBinary }); // echo once
-    setTimeout(() => ws.close(1000, "clean"), 50);
+function log(kind, obj) {
+  console.log(JSON.stringify({ t: new Date().toISOString(), kind, ...obj }));
+}
+
+app.prepare().then(() => {
+  const server = http.createServer((req, res) => {
+    // cheap health check so Render can mark deploy as live
+    try {
+      const { pathname } = new URL(req.url, `http://${req.headers.host}`);
+      if (pathname === '/healthz') {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+    } catch (_) {}
+
+    // hand off to Next for everything else
+    handle(req, res);
   });
-});
 
-wssPing.on("connection", (ws) => {
-  const id = setInterval(() => {
-    if (ws.readyState === ws.OPEN) ws.send("pong");
-  }, 2000);
-  ws.on("close", () => clearInterval(id));
-});
+  // One WS server, we’ll route upgrades by path
+  const wss = new WebSocketServer({ noServer: true });
 
-wssDemo.on("connection", (ws) => {
-  ws.send("demo: handshake ok");
-});
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = '';
+    try {
+      pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
 
-await app.prepare();
+    // Only accept our 3 WS paths
+    if (pathname === '/ws-echo' || pathname === '/ws-ping' || pathname === '/web-demo/ws') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.pathname = pathname;
+        wss.emit('connection', ws, req);
+      });
+    } else {
+      socket.destroy();
+    }
+  });
 
-const server = http.createServer((req, res) => {
-  // tiny http logger (morgan) without Express
-  morgan("tiny")(req, res, () => handle(req, res));
-});
+  wss.on('connection', (ws) => {
+    const path = ws.pathname || '';
+    log('ws_conn', { path });
 
-// Manual upgrade routing
-server.on("upgrade", (req, socket, head) => {
-  const { url = "" } = req;
-  if (url === "/ws-echo") {
-    wssEcho.handleUpgrade(req, socket, head, (ws) =>
-      wssEcho.emit("connection", ws, req)
-    );
-  } else if (url === "/ws-ping") {
-    wssPing.handleUpgrade(req, socket, head, (ws) =>
-      wssPing.emit("connection", ws, req)
-    );
-  } else if (url === "/web-demo/ws") {
-    wssDemo.handleUpgrade(req, socket, head, (ws) =>
-      wssDemo.emit("connection", ws, req)
-    );
-  } else {
-    socket.destroy();
-  }
-});
+    if (path === '/ws-echo') {
+      ws.on('message', (data) => ws.send(data));
+    } else if (path === '/ws-ping') {
+      const iv = setInterval(() => {
+        if (ws.readyState === ws.OPEN) ws.send('pong');
+      }, 1000);
+      ws.on('close', () => clearInterval(iv));
+    } else if (path === '/web-demo/ws') {
+      ws.send(JSON.stringify({ ok: true, msg: 'demo: handshake ok' }));
+    }
+  });
 
-server.listen(port, () => {
-  console.log("server_listen", { url: `http://0.0.0.0:${port}` });
+  server.listen(PORT, '0.0.0.0', () => {
+    log('server_listen', { url: `http://0.0.0.0:${PORT}`, node: process.version });
+  });
 });

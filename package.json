@@ -11,8 +11,7 @@
     "start": "NODE_ENV=production node index.js"
   },
   "dependencies": {
-    "morgan": "^1.10.0",
-    "next": "14.2.5",
+       "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "ws": "^8.18.0"
