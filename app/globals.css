@@ -1,26 +1,17 @@
-/* Tailwind layers (harmless if Tailwind isn't installed) */
+/* app/globals.css — Tailwind base */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ---- Global dark theme tweaks ---- */
-:root {
-  --bg: #000000;
-  --fg: #ffffff;
-}
-
+/* Base tweaks so the dark theme is obvious even before hydration */
 html, body {
   height: 100%;
 }
 
+/* Optional: smooth fonts */
 body {
-  background: var(--bg);
-  color: var(--fg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-code, pre {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 0.9em;
-}
+/* You can add component classes here if desired */
