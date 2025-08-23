@@ -11,11 +11,12 @@
     "start": "NODE_ENV=production node index.js"
   },
   "dependencies": {
+    "express": "^5.1.0",
     "morgan": "^1.10.1",
     "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "ws": "^8.18.0"
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
