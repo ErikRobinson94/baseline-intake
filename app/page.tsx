@@ -2,50 +2,19 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/**
- * Two-pane landing:
- * - Left: hero + controls
- * - Right: "Conversation" transcript area that doubles as a log console
- *
- * Keeps the existing smoke tests:
- *  - WS /ws-echo (send text, expect echo)
- *  - WS /ws-ping (server pushes "pong" every ~5s)
- *
- * No SSR hazards: window/location only used inside handlers/effects.
- */
-
 type LogLevel = 'info' | 'ok' | 'warn' | 'error';
 type LogLine = { t: string; level: LogLevel; msg: string };
 
 export default function Page() {
-  // ---- log state ----
+  // ---------------- state
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [voiceId, setVoiceId] = useState<'1' | '2' | '3'>('2');
+  const [connected, setConnected] = useState<boolean>(false);
+
   const logEndRef = useRef<HTMLDivElement | null>(null);
-
-  const pushLog = (level: LogLevel, msg: string) => {
-    const now = new Date();
-    setLogs((prev) => [
-      ...prev,
-      {
-        t: now.toLocaleTimeString(),
-        level,
-        msg,
-      },
-    ]);
-  };
-
-  useEffect(() => {
-    // autoscroll to the newest entry
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
-
-  const clearLogs = () => setLogs([]);
-
-  // ---- ws refs ----
   const echoRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<WebSocket | null>(null);
 
-  // Derive WebSocket base url safely on the client.
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
     const isHttps = window.location.protocol === 'https:';
@@ -53,10 +22,21 @@ export default function Page() {
     return `${scheme}://${window.location.host}`;
   }, []);
 
-  // ---- echo helpers ----
+  // --------------- logging helpers
+  const pushLog = (level: LogLevel, msg: string) => {
+    const now = new Date();
+    setLogs((prev) => [...prev, { t: now.toLocaleTimeString(), level, msg }]);
+  };
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  const clearLogs = () => setLogs([]);
+
+  // --------------- ws: echo
   const connectEcho = () => {
     if (!wsBase) return;
-    // close any existing
     echoRef.current?.close();
 
     const url = `${wsBase}/ws-echo`;
@@ -76,9 +56,9 @@ export default function Page() {
       pushLog('warn', '[echo] not connected');
       return;
     }
-    const payload = `hello from smoke test @ ${new Date().toISOString()}`;
+    const payload = JSON.stringify({ type: 'hello', voiceId });
     ws.send(payload);
-    pushLog('info', `[echo] sent → "${payload}"`);
+    pushLog('info', `[echo] sent → ${payload}`);
   };
 
   const closeEcho = () => {
@@ -86,10 +66,9 @@ export default function Page() {
     echoRef.current = null;
   };
 
-  // ---- ping helpers ----
+  // --------------- ws: ping
   const connectPing = () => {
     if (!wsBase) return;
-    // close any existing
     pingRef.current?.close();
 
     const url = `${wsBase}/ws-ping`;
@@ -108,20 +87,21 @@ export default function Page() {
     pingRef.current = null;
   };
 
-  // ---- combined controls ----
+  // --------------- combined controls
   const startSmokeTest = () => {
     connectEcho();
     connectPing();
-    // send an initial echo after a short tick so OPEN has time to fire
+    setConnected(true);
     setTimeout(() => sendEcho(), 200);
   };
 
   const stopSmokeTest = () => {
     closeEcho();
     closePing();
+    setConnected(false);
   };
 
-  // Basic connection indicators
+  // --------------- ui helpers
   const echoState = echoRef.current?.readyState;
   const pingState = pingRef.current?.readyState;
 
@@ -138,32 +118,94 @@ export default function Page() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100">
-      {/* max width wrapper */}
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-6 md:flex-row md:gap-8 md:p-10">
-        {/* LEFT: HERO */}
-        <section className="md:w-1/2">
+      {/* Top bar */}
+      <header className="mx-auto w-full max-w-7xl px-6 py-4 md:px-10">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 font-semibold">
+              C
+            </div>
+            <div className="text-sm leading-tight">
+              <div className="font-semibold tracking-wide">CASE CONNECT</div>
+              <div className="text-neutral-400">Demo</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span
+              className={`rounded-full px-3 py-1 text-xs ${
+                connected ? 'bg-emerald-600/90' : 'bg-neutral-800'
+              }`}
+            >
+              {connected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      {/* Two-pane layout */}
+      <div className="mx-auto grid w-full max-w-7xl grid-cols-1 gap-8 px-6 pb-12 md:grid-cols-2 md:px-10">
+        {/* LEFT */}
+        <section>
           <div className="space-y-6">
-            <div>
-              <span className="inline-block rounded-full bg-neutral-800 px-3 py-1 text-xs tracking-wide text-neutral-300">
-                Baseline · Node + Next.js · Render
-              </span>
-              <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-5xl">
-                Voice Intake, done right.
-              </h1>
-              <p className="mt-3 max-w-prose text-neutral-300">
-                This is the baseline shell we’ll extend with audio worklets and a Deepgram bridge.
-                For now, use the smoke tests to verify the WebSocket layer on{' '}
-                <span className="font-mono text-neutral-200">
-                  /ws-echo
-                </span>{' '}
-                and{' '}
-                <span className="font-mono text-neutral-200">
-                  /ws-ping
-                </span>
-                .
-              </p>
+            <span className="inline-block rounded-full bg-neutral-800 px-3 py-1 text-xs tracking-wide text-neutral-300">
+              Baseline · Node + Next.js · Render
+            </span>
+
+            <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl">
+              Voice Intake, done right.
+            </h1>
+            <p className="max-w-prose text-neutral-300">
+              Speak with our virtual assistant and experience a legal intake done right. For now,
+              use the smoke tests to verify the WebSocket layer on{' '}
+              <span className="font-mono text-neutral-200">/ws-echo</span> and{' '}
+              <span className="font-mono text-neutral-200">/ws-ping</span>.
+            </p>
+
+            {/* Voice selector */}
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-base font-semibold">Choose a voice to sample</h3>
+                <div className="text-xs text-neutral-400">Selected: Voice {voiceId}</div>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                {(['1', '2', '3'] as const).map((id) => (
+                  <button
+                    key={id}
+                    onClick={() => setVoiceId(id)}
+                    className={`group flex flex-col items-center justify-center gap-2 rounded-2xl border p-5 transition
+                      ${
+                        voiceId === id
+                          ? 'border-emerald-500/80 bg-emerald-500/10'
+                          : 'border-neutral-800 bg-neutral-900/40 hover:bg-neutral-800'
+                      }`}
+                  >
+                    <div className="flex h-16 w-16 items-center justify-center rounded-xl bg-neutral-800 text-lg font-bold text-neutral-200 group-hover:scale-[1.02]">
+                      {id}
+                    </div>
+                    <div className="text-sm text-neutral-300">Voice {id}</div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Action row */}
+              <div className="mt-6 flex items-center justify-between">
+                <button
+                  onClick={startSmokeTest}
+                  className="rounded-xl bg-emerald-600 px-4 py-2 font-medium hover:bg-emerald-500"
+                >
+                  Start demo
+                </button>
+                <button
+                  onClick={stopSmokeTest}
+                  className="rounded-xl bg-rose-600 px-4 py-2 font-medium hover:bg-rose-500"
+                >
+                  Stop
+                </button>
+              </div>
             </div>
 
+            {/* Smoke test controls block (explicit as in your baseline) */}
             <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
               <h2 className="mb-3 text-lg font-semibold">Smoke test controls</h2>
               <div className="flex flex-wrap gap-3">
@@ -231,8 +273,8 @@ export default function Page() {
           </div>
         </section>
 
-        {/* RIGHT: CONVERSATION / LOGS */}
-        <section className="md:w-1/2">
+        {/* RIGHT: Conversation / Logs */}
+        <section>
           <div className="flex h-[70vh] min-h-[480px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/50">
             <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
               <h2 className="text-lg font-semibold">Conversation</h2>
@@ -244,7 +286,7 @@ export default function Page() {
             <div className="flex-1 overflow-y-auto px-4 py-3">
               {logs.length === 0 ? (
                 <p className="select-none text-neutral-400">
-                  Logs will appear here. Click <span className="font-semibold">Start smoke test</span>.
+                  Logs will appear here. Click <span className="font-semibold">Start demo</span>.
                 </p>
               ) : (
                 <ul className="space-y-1">
