@@ -3,12 +3,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 /**
- * Centered card on black background:
- *  - Left: hero + CTA + three voice cards
- *  - Right: Conversation (scrolling logs)
- *  - Bottom-right row: Start / Stop (quick demo controls)
- * Advanced controls (echo/ping buttons + states) remain in a <details> block.
- * Tailwind is loaded via CDN in app/layout.tsx (no PostCSS).
+ * Centered dark card, hero left + conversation right.
+ * Tailwind is via CDN (see app/layout.tsx). No PostCSS.
  */
 
 type LogLevel = 'info' | 'ok' | 'warn' | 'error';
@@ -20,117 +16,93 @@ const VOICES = [
   { id: '3', name: 'Voice 3', src: '/voices/voice3.png' },
 ] as const;
 
-// circular SVG avatar fallback (used if /public/voices/*.png are missing)
 const FALLBACK_DATA_URI =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+    `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320">
       <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop stop-color="#00e5a8" offset="0"/>
-          <stop stop-color="#24c1ff" offset="1"/>
-        </linearGradient>
+        <radialGradient id="g" cx="50%" cy="40%" r="60%">
+          <stop offset="0" stop-color="#15e3b9"/>
+          <stop offset="1" stop-color="#0ea5e9"/>
+        </radialGradient>
       </defs>
-      <rect width="256" height="256" rx="128" fill="url(#g)"/>
-      <circle cx="128" cy="110" r="44" fill="#000" opacity="0.85"/>
-      <rect x="64" y="158" width="128" height="46" rx="23" fill="#000" opacity="0.85"/>
+      <rect width="320" height="320" rx="160" fill="url(#g)"/>
+      <circle cx="160" cy="135" r="56" fill="#0b0b0f" opacity="0.9"/>
+      <rect x="80" y="200" width="160" height="55" rx="27.5" fill="#0b0b0f" opacity="0.9"/>
     </svg>`
   );
 
 export default function Page() {
-  // --- UI state
+  // ---------- UI state
   const [voiceId, setVoiceId] = useState<'1' | '2' | '3'>('2');
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [connected, setConnected] = useState(false);
 
-  // --- logs
+  // ---------- logs
   const [logs, setLogs] = useState<LogLine[]>([]);
   const logEndRef = useRef<HTMLDivElement | null>(null);
-  const pushLog = (level: LogLevel, msg: string) => {
-    const now = new Date();
-    setLogs((prev) => [...prev, { t: now.toLocaleTimeString(), level, msg }]);
-  };
+  const pushLog = (level: LogLevel, msg: string) =>
+    setLogs((prev) => [...prev, { t: new Date().toLocaleTimeString(), level, msg }]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // --- ws refs
+  // ---------- ws
   const echoRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<WebSocket | null>(null);
-
-  // --- ws base (client-only)
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
     const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
     return `${scheme}://${window.location.host}`;
   }, []);
 
-  // --- echo
   const connectEcho = () => {
     if (!wsBase) return;
     echoRef.current?.close();
     const url = `${wsBase}/ws-echo`;
     const ws = new WebSocket(url);
     echoRef.current = ws;
-
     ws.onopen = () => pushLog('ok', `[echo] open → ${url}`);
     ws.onmessage = (ev) =>
-      pushLog('ok', `[echo] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'} `);
+      pushLog('ok', `[echo] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'}`);
     ws.onerror = (e: any) => pushLog('error', `[echo] error: ${e?.message ?? 'unknown'}`);
     ws.onclose = () => pushLog('warn', `[echo] closed`);
   };
-
   const sendEcho = () => {
     const ws = echoRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       pushLog('warn', '[echo] not connected');
       return;
     }
-    const payload = JSON.stringify({ type: 'hello', voiceId, voiceEnabled });
+    const payload = JSON.stringify({ type: 'hello', voiceId });
     ws.send(payload);
     pushLog('info', `[echo] sent → ${payload}`);
   };
-
-  const closeEcho = () => {
-    echoRef.current?.close();
-    echoRef.current = null;
-  };
-
-  // --- ping
   const connectPing = () => {
     if (!wsBase) return;
     pingRef.current?.close();
     const url = `${wsBase}/ws-ping`;
     const ws = new WebSocket(url);
     pingRef.current = ws;
-
     ws.onopen = () => pushLog('ok', `[ping] open → ${url}`);
     ws.onmessage = (ev) =>
-      pushLog('ok', `[ping] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'}`);
+      pushLog('ok', `[ping] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'} (pong)`);
     ws.onerror = (e: any) => pushLog('error', `[ping] error: ${e?.message ?? 'unknown'}`);
     ws.onclose = () => pushLog('warn', `[ping] closed`);
   };
-
-  const closePing = () => {
+  const stop = () => {
+    echoRef.current?.close();
     pingRef.current?.close();
+    echoRef.current = null;
     pingRef.current = null;
+    setConnected(false);
   };
-
-  // --- combined
-  const startSmokeTest = () => {
+  const start = () => {
     connectEcho();
     connectPing();
     setConnected(true);
-    setTimeout(() => sendEcho(), 200); // first hello
+    setTimeout(() => sendEcho(), 200);
   };
 
-  const stopSmokeTest = () => {
-    closeEcho();
-    closePing();
-    setConnected(false);
-  };
-
-  // --- ui helpers
   const echoState = echoRef.current?.readyState;
   const pingState = pingRef.current?.readyState;
   const readyLabel = (rs?: number) =>
@@ -146,157 +118,87 @@ export default function Page() {
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
-      {/* Centered card wrapper */}
-      <div className="mx-auto w-full max-w-6xl px-4 py-10 sm:px-6">
-        <div className="relative rounded-3xl border border-neutral-800 bg-neutral-900/40 p-6 shadow-2xl sm:p-8 md:p-10">
-          {/* Title bar */}
-          <div className="mb-6 flex items-center justify-between">
+      {/* CENTERED CARD */}
+      <div className="mx-auto w-full max-w-[1200px] px-4 py-10">
+        <div className="relative rounded-[28px] border border-neutral-800/80 bg-[#0c0c0f]/70 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_60px_rgba(0,0,0,0.6)]">
+          {/* subtle inner gradient */}
+          <div className="pointer-events-none absolute inset-0 rounded-[28px] opacity-40"
+               style={{ background: 'radial-gradient(1100px 400px at -200px -100px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(1100px 400px at 120% 10%, rgba(0,180,255,0.08), transparent 60%)' }} />
+
+          {/* HEADER ROW */}
+          <div className="relative flex items-center justify-between px-8 pt-6">
             <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
               <div className="text-sm leading-tight">
                 <div className="font-semibold tracking-wide">CASE CONNECT</div>
                 <div className="text-neutral-400">Demo</div>
               </div>
             </div>
-            <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800'}`}>
+            <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800/80'}`}>
               {connected ? 'Connected' : 'Disconnected'}
             </span>
           </div>
 
-          {/* Inner grid: hero left, conversation right */}
-          <div className="grid grid-cols-1 gap-8 md:grid-cols-[1.15fr_1fr]">
+          {/* GRID: LEFT HERO / RIGHT CONVO */}
+          <div className="relative grid grid-cols-1 gap-8 px-8 pb-8 pt-4 md:grid-cols-[1.2fr_1fr]">
             {/* LEFT */}
             <section className="space-y-8">
-              {/* hero */}
               <div className="space-y-6">
-                <h1 className="text-4xl font-extrabold leading-tight text-amber-300 sm:text-5xl">
+                <h1 className="text-[40px] font-extrabold leading-tight text-amber-300 sm:text-[54px]">
                   Demo our AI intake experience
                 </h1>
-                <p className="max-w-prose text-lg text-neutral-300">
+                <p className="max-w-[44ch] text-[18px] text-neutral-300">
                   Speak with our virtual assistant and experience a legal intake done right.
                 </p>
-
-                <div className="pt-2">
-                  <button
-                    onClick={startSmokeTest}
-                    className="rounded-full bg-amber-500 px-6 py-3 text-lg font-semibold text-black shadow hover:bg-amber-400"
-                  >
-                    Speak with AI Assistant
-                  </button>
-                </div>
+                <button
+                  onClick={start}
+                  className="rounded-full bg-amber-500 px-6 py-3 text-lg font-semibold text-black shadow hover:bg-amber-400"
+                >
+                  Speak with AI Assistant
+                </button>
               </div>
 
-              {/* voices */}
               <div className="space-y-5">
-                <h3 className="text-xl font-semibold text-amber-100">Choose a voice to sample</h3>
-
-                <div className="grid grid-cols-3 gap-4">
+                <h3 className="text-[20px] font-semibold text-amber-100">Choose a voice to sample</h3>
+                <div className="grid grid-cols-3 gap-5">
                   {VOICES.map((v) => (
                     <button
                       key={v.id}
                       onClick={() => setVoiceId(v.id as '1' | '2' | '3')}
-                      className={`group relative overflow-hidden rounded-2xl border transition
+                      className={`relative overflow-hidden rounded-2xl border p-5 transition
                         ${
                           voiceId === v.id
-                            ? 'border-amber-400/80 bg-amber-400/10'
-                            : 'border-neutral-800 bg-neutral-900/40 hover:bg-neutral-800'
+                            ? 'border-amber-400 bg-amber-400/10'
+                            : 'border-neutral-800 bg-neutral-900/50 hover:bg-neutral-800'
                         }`}
                     >
-                      <div className="flex flex-col items-center gap-2 p-4">
-                        <div className="relative h-28 w-28 rounded-full ring-2 ring-cyan-400/60">
-                          <img
-                            src={v.src}
-                            alt={v.name}
-                            className="h-28 w-28 rounded-full object-cover"
-                            onError={(e) => {
-                              const t = e.currentTarget as HTMLImageElement;
-                              if (t.src !== FALLBACK_DATA_URI) t.src = FALLBACK_DATA_URI;
-                            }}
-                          />
-                        </div>
-                        <div className="pb-1 text-sm text-amber-100">{v.name}</div>
+                      <div className="mx-auto mb-3 h-[120px] w-[120px] rounded-full ring-2 ring-cyan-400/70 shadow-[0_0_30px_rgba(34,211,238,0.25)]">
+                        <img
+                          src={v.src}
+                          alt={v.name}
+                          className="h-[120px] w-[120px] rounded-full object-cover"
+                          onError={(e) => {
+                            const t = e.currentTarget as HTMLImageElement;
+                            if (t.src !== FALLBACK_DATA_URI) t.src = FALLBACK_DATA_URI;
+                          }}
+                        />
                       </div>
+                      <div className="text-center text-sm text-amber-100">{v.name}</div>
                     </button>
                   ))}
                 </div>
-
-                {/* voice toggle (like the mock) */}
-                <div className="mt-1 flex items-center gap-3 pl-1 text-neutral-300">
-                  <span className="text-base">Voice</span>
-                  <label className="relative inline-flex cursor-pointer items-center">
-                    <input
-                      type="checkbox"
-                      className="peer sr-only"
-                      checked={voiceEnabled}
-                      onChange={(e) => setVoiceEnabled(e.target.checked)}
-                    />
-                    <div className="peer h-6 w-12 rounded-full bg-neutral-700 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-amber-500 peer-checked:after:translate-x-6" />
-                  </label>
-                </div>
-
-                {/* Advanced smoke controls */}
-                <details className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4 open:pb-5">
-                  <summary className="cursor-pointer text-sm text-neutral-300">
-                    Advanced: WebSocket smoke controls
-                  </summary>
-
-                  <div className="mt-3 flex flex-wrap gap-3">
-                    <button onClick={startSmokeTest} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500">
-                      Start
-                    </button>
-                    <button onClick={stopSmokeTest} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium hover:bg-rose-500">
-                      Stop
-                    </button>
-                    <button onClick={connectEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                      Connect echo
-                    </button>
-                    <button onClick={sendEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                      Send echo
-                    </button>
-                    <button onClick={connectPing} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                      Connect ping
-                    </button>
-                    <button onClick={() => setLogs([])} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                      Clear logs
-                    </button>
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-neutral-300">
-                    <div className="rounded-lg border border-neutral-800 p-3">
-                      <div className="text-neutral-400">/ws-echo</div>
-                      <div className="mt-1 font-mono text-xs">
-                        state: <span className="font-semibold">{readyLabel(echoState)}</span>
-                      </div>
-                    </div>
-                    <div className="rounded-lg border border-neutral-800 p-3">
-                      <div className="text-neutral-400">/ws-ping</div>
-                      <div className="mt-1 font-mono text-xs">
-                        state: <span className="font-semibold">{readyLabel(pingState)}</span>
-                      </div>
-                    </div>
-                    <a
-                      href="/healthz"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="col-span-2 inline-flex items-center justify-center rounded-lg border border-neutral-800 px-3 py-2 text-center text-sm font-medium hover:bg-neutral-800"
-                    >
-                      Check /healthz
-                    </a>
-                  </div>
-                </details>
               </div>
             </section>
 
-            {/* RIGHT — Conversation */}
+            {/* RIGHT */}
             <section>
-              <div className="flex h-[60vh] min-h-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/60 shadow-lg">
+              <div className="flex h-[540px] min-h-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
                     {logs.length} {logs.length === 1 ? 'event' : 'events'}
                   </span>
                 </header>
-
                 <div className="flex-1 overflow-y-auto px-4 py-3">
                   {logs.length === 0 ? (
                     <p className="select-none text-neutral-400">
@@ -317,25 +219,75 @@ export default function Page() {
                   )}
                   <div ref={logEndRef} />
                 </div>
+                <footer className="border-t border-neutral-800 px-4 py-2 text-[11px] text-neutral-400">
+                  Verify echo/ping stability. Next: audio worklets → Deepgram.
+                </footer>
               </div>
             </section>
           </div>
 
-          {/* Bottom-right quick controls inside the card */}
-          <div className="mt-6 flex items-center justify-end gap-3">
+          {/* Bottom-right Start / Stop inside the card */}
+          <div className="relative -mt-2 flex items-center justify-end gap-3 px-8 pb-6">
             <button
-              onClick={startSmokeTest}
+              onClick={start}
               className="rounded-xl bg-amber-500 px-5 py-2 font-semibold text-black hover:bg-amber-400"
             >
               Start
             </button>
             <button
-              onClick={stopSmokeTest}
+              onClick={stop}
               className="rounded-xl bg-neutral-800 px-5 py-2 font-semibold hover:bg-neutral-700"
             >
               Stop
             </button>
           </div>
+
+          {/* Advanced smoke controls (collapsed) */}
+          <details className="mx-8 mb-6 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
+            <summary className="cursor-pointer text-sm text-neutral-300">Advanced smoke controls</summary>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <button onClick={start} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500">
+                Start smoke test
+              </button>
+              <button onClick={stop} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium hover:bg-rose-500">
+                Stop
+              </button>
+              <button onClick={connectEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
+                Connect echo
+              </button>
+              <button onClick={sendEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
+                Send echo
+              </button>
+              <button onClick={connectPing} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
+                Connect ping
+              </button>
+              <button onClick={() => setLogs([])} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
+                Clear logs
+              </button>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-neutral-300">
+              <div className="rounded-lg border border-neutral-800 p-3">
+                <div className="text-neutral-400">/ws-echo</div>
+                <div className="mt-1 font-mono text-xs">
+                  state: <span className="font-semibold">{readyLabel(echoState)}</span>
+                </div>
+              </div>
+              <div className="rounded-lg border border-neutral-800 p-3">
+                <div className="text-neutral-400">/ws-ping</div>
+                <div className="mt-1 font-mono text-xs">
+                  state: <span className="font-semibold">{readyLabel(pingState)}</span>
+                </div>
+              </div>
+              <a
+                href="/healthz"
+                target="_blank"
+                rel="noreferrer"
+                className="col-span-2 inline-flex items-center justify-center rounded-lg border border-neutral-800 px-3 py-2 text-center text-sm font-medium hover:bg-neutral-800"
+              >
+                Check /healthz
+              </a>
+            </div>
+          </details>
         </div>
       </div>
     </main>
@@ -349,9 +301,5 @@ function LevelPill({ level }: { level: LogLevel }) {
     warn: 'bg-amber-700',
     error: 'bg-rose-700',
   };
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] ${map[level]}`}>
-      {level.toUpperCase()}
-    </span>
-  );
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] ${map[level]}`}>{level.toUpperCase()}</span>;
 }
