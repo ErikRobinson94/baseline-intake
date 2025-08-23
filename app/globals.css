@@ -1,17 +1,10 @@
-/* app/globals.css — Tailwind base */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 entry */
+@import "tailwindcss";
 
-/* Base tweaks so the dark theme is obvious even before hydration */
-html, body {
-  height: 100%;
-}
-
-/* Optional: smooth fonts */
+/* optional base tweaks */
+html, body { height: 100%; }
 body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* You can add component classes here if desired */
