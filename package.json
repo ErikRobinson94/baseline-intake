@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "NODE_ENV=development node index.js",
     "build": "next build",
-    "start": "NODE_ENV=production node index.js"
+    "start": "start": "NODE_ENV=production node index.js"
   },
   "dependencies": {
     "express": "^5.1.0",
