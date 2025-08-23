@@ -105,6 +105,7 @@ export default function Page() {
     <main className="min-h-screen bg-black text-neutral-100">
       <div className="mx-auto w-full max-w-[1150px] px-4 py-6">
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
+          {/* subtle background */}
           <div
             className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
             style={{
@@ -113,15 +114,8 @@ export default function Page() {
             }}
           />
 
-          {/* top bar */}
-          <div className="relative flex items-center justify-between px-7 pt-4">
-            <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
-              <div className="text-sm leading-tight">
-                <div className="font-semibold tracking-wide">CASE CONNECT</div>
-                <div className="text-neutral-400">Demo</div>
-              </div>
-            </div>
+          {/* status pill only (top-right), per your request the brand line is centered in hero below */}
+          <div className="relative flex items-center justify-end px-7 pt-4">
             <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800/80'}`}>
               {connected ? 'Connected' : 'Disconnected'}
             </span>
@@ -129,13 +123,33 @@ export default function Page() {
 
           {/* main grid */}
           <div className="relative grid grid-cols-1 gap-5 px-7 pb-5 pt-1 md:grid-cols-[1.35fr_0.9fr]">
-            {/* LEFT: branding (shortened) */}
+            {/* LEFT: branding */}
             <section className="flex flex-col items-center">
-              <div className="w-full max-w-[500px] text-center">
-                <h1 className="mb-2 text-[30px] font-extrabold leading-tight text-amber-300 sm:text-[38px]">
+              {/* centered brand line */}
+              <div className="mb-3 flex items-center justify-center gap-3">
+                {/* two blue “cc” circles */}
+                <svg
+                  width="36"
+                  height="20"
+                  viewBox="0 0 54 28"
+                  aria-hidden
+                  className="text-sky-400"
+                >
+                  <circle cx="14" cy="14" r="12" fill="none" stroke="currentColor" strokeWidth="3" />
+                  <circle cx="34" cy="14" r="12" fill="none" stroke="currentColor" strokeWidth="3" />
+                </svg>
+                <div className="text-sm md:text-base">
+                  <span className="font-semibold tracking-wide text-sky-400">CASE</span>{' '}
+                  <span className="font-semibold tracking-wide text-neutral-200">CONNECT</span>
+                </div>
+              </div>
+
+              <div className="w-full max-w-[860px] text-center">
+                {/* one line headline/subhead on desktop */}
+                <h1 className="mb-2 text-[34px] font-extrabold leading-tight text-amber-300 md:text-[40px] md:whitespace-nowrap">
                   Demo our AI intake experience
                 </h1>
-                <p className="mx-auto mb-4 max-w-[42ch] text-[16px] text-neutral-300">
+                <p className="mx-auto mb-4 max-w-none text-[16px] text-neutral-300 md:whitespace-nowrap">
                   Speak with our virtual assistant and experience a legal intake done right.
                 </p>
                 <button
@@ -146,12 +160,12 @@ export default function Page() {
                 </button>
               </div>
 
-              {/* voice tiles: SHORT */}
-              <div className="w-full max-w-[640px]">
+              {/* voice tiles (short) */}
+              <div className="w-full max-w-[860px]">
                 <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">
                   Choose a voice to sample
                 </h3>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-3 gap-4">
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
                       <button
@@ -168,7 +182,7 @@ export default function Page() {
                         <img
                           src={v.src}
                           alt={v.name}
-                          className="h-full w-full object-contain bg-black"
+                          className="h-full w-full bg-black object-contain"
                           onError={(e) => {
                             const t = e.currentTarget as HTMLImageElement;
                             if (t.src !== FALLBACK_DATA_URI) t.src = FALLBACK_DATA_URI;
@@ -185,7 +199,7 @@ export default function Page() {
               </div>
             </section>
 
-            {/* RIGHT: messenger (narrower & balanced height) */}
+            {/* RIGHT: messenger */}
             <section className="flex justify-center">
               <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
