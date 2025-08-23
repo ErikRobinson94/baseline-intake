@@ -2,9 +2,9 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-/** Avoid any static prerendering surprise */
+// Force runtime rendering; avoid any static caching for `/`
 export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+export const revalidate = false;
 
 type Log = { t: number; level: 'info' | 'warn' | 'error'; msg: string; meta?: any };
 
@@ -25,14 +25,12 @@ function useLogger() {
   return { logs, add, clear };
 }
 
-/** Client-only: safe even during SSR/build */
 function getWSBase(): string {
   if (typeof window === 'undefined') return '';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}`;
 }
 
-/** small helper to try a websocket and wait for first expected msg (or timeout) */
 async function wsTry(
   url: string,
   opts: {
@@ -91,10 +89,7 @@ export default function Page() {
   const runningRef = useRef(false);
   const liveWS = useRef<WebSocket | null>(null);
 
-  // selected voice for the demo WS
   const [voiceId, setVoiceId] = useState<number>(2);
-
-  // Compute WS base **after mount** to avoid SSR accessing `window`
   const [base, setBase] = useState('');
   useEffect(() => { setBase(getWSBase()); }, []);
 
@@ -121,7 +116,6 @@ export default function Page() {
     add('info', `Connecting → ${urls.demo(voiceId)}`);
 
     try {
-      // quick preflight like the smoke page
       await wsTry(urls.echo, {
         name: 'ws-echo',
         onOpen: (ws) => ws.send(new Blob([new Uint8Array([1,2,3,4])])),
@@ -138,11 +132,8 @@ export default function Page() {
         logger: add,
       });
 
-      // live demo connection
-      const demoUrl = urls.demo(voiceId);
-      const ws = new WebSocket(demoUrl);
+      const ws = new WebSocket(urls.demo(voiceId));
       liveWS.current = ws;
-
       ws.onopen = () => add('info', `WS open`);
       ws.onmessage = (e) => {
         const kind = typeof e.data;
@@ -162,9 +153,8 @@ export default function Page() {
     <main className="min-h-screen bg-black text-white">
       <div className="mx-auto max-w-7xl px-6 py-10">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* LEFT: marketing block */}
+          {/* LEFT: hero */}
           <section>
-            {/* logo row */}
             <div className="flex items-center gap-3 mb-10">
               <div className="h-10 w-10 grid place-items-center rounded-full bg-emerald-400/20 text-emerald-300 font-bold">C</div>
               <div className="leading-tight">
@@ -214,7 +204,7 @@ export default function Page() {
             </div>
           </section>
 
-          {/* RIGHT: conversation / log panel */}
+          {/* RIGHT: log panel */}
           <section className="rounded-2xl bg-zinc-900 border border-zinc-800 p-5">
             <div className="flex items-center justify-between mb-3">
               <div>
