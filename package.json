@@ -6,9 +6,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "NODE_ENV=development node index.js",
-    "build": "next build",
-    "start": "NODE_ENV=production node index.js"
+      "dev": "next dev",
+      "build": "next build",
+      "start": "NODE_ENV=production node index.cjs"
   },
   "dependencies": {
     "express": "^5.1.0",
