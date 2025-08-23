@@ -2,12 +2,6 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/**
- * Centered, shorter card; hero stack is centered;
- * voice cards are full-bleed rectangle tiles (no circular crop).
- * Tailwind via CDN from layout.tsx. No PostCSS required.
- */
-
 type LogLevel = 'info' | 'ok' | 'warn' | 'error';
 type LogLine = { t: string; level: LogLevel; msg: string };
 
@@ -17,38 +11,27 @@ const VOICES = [
   { id: '3', name: 'Voice 3', src: '/voices/voice3.png' },
 ] as const;
 
-// rectangular fallback artwork
 const FALLBACK_DATA_URI =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="800">
-      <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#00e5a8"/>
-          <stop offset="1" stop-color="#24c1ff"/>
-        </linearGradient>
-      </defs>
-      <rect width="640" height="800" rx="16" fill="#000"/>
-      <rect x="16" y="16" width="608" height="768" rx="16" fill="url(#g)" opacity="0.15"/>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="640">
+      <rect width="480" height="640" rx="18" fill="#000"/>
+      <rect x="18" y="18" width="444" height="604" rx="14" fill="#10b981" opacity="0.12"/>
     </svg>`
   );
 
 export default function Page() {
-  // ---------- UI state
   const [voiceId, setVoiceId] = useState<'1' | '2' | '3'>('2');
   const [connected, setConnected] = useState(false);
 
-  // ---------- logs
   const [logs, setLogs] = useState<LogLine[]>([]);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const pushLog = (level: LogLevel, msg: string) =>
-    setLogs((prev) => [...prev, { t: new Date().toLocaleTimeString(), level, msg }]); // ← fixed
-
+    setLogs((prev) => [...prev, { t: new Date().toLocaleTimeString(), level, msg }]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // ---------- ws
   const echoRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<WebSocket | null>(null);
   const wsBase = useMemo(() => {
@@ -69,7 +52,6 @@ export default function Page() {
     ws.onerror = (e: any) => pushLog('error', `[echo] error: ${e?.message ?? 'unknown'}`);
     ws.onclose = () => pushLog('warn', `[echo] closed`);
   };
-
   const sendEcho = () => {
     const ws = echoRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -80,7 +62,6 @@ export default function Page() {
     ws.send(payload);
     pushLog('info', `[echo] sent → ${payload}`);
   };
-
   const connectPing = () => {
     if (!wsBase) return;
     pingRef.current?.close();
@@ -93,14 +74,12 @@ export default function Page() {
     ws.onerror = (e: any) => pushLog('error', `[ping] error: ${e?.message ?? 'unknown'}`);
     ws.onclose = () => pushLog('warn', `[ping] closed`);
   };
-
   const start = () => {
     connectEcho();
     connectPing();
     setConnected(true);
     setTimeout(() => sendEcho(), 200);
   };
-
   const stop = () => {
     echoRef.current?.close();
     pingRef.current?.close();
@@ -124,18 +103,17 @@ export default function Page() {
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
-      {/* SHORT, WIDE CENTERED CARD */}
       <div className="mx-auto w-full max-w-[1200px] px-4 py-8">
         <div className="relative rounded-[28px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_60px_rgba(0,0,0,0.55)]">
           <div
-            className="pointer-events-none absolute inset-0 rounded-[28px] opacity-35"
+            className="pointer-events-none absolute inset-0 rounded-[28px] opacity-30"
             style={{
               background:
-                'radial-gradient(900px 300px at -150px -80px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(900px 300px at 120% 0, rgba(0,180,255,0.08), transparent 60%)',
+                'radial-gradient(800px 240px at -140px -70px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(800px 260px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
             }}
           />
 
-          {/* HEADER ROW */}
+          {/* header row */}
           <div className="relative flex items-center justify-between px-8 pt-5">
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
@@ -149,36 +127,37 @@ export default function Page() {
             </span>
           </div>
 
-          {/* GRID: HERO + CONVERSATION */}
-          <div className="relative grid grid-cols-1 gap-6 px-8 pb-6 pt-2 md:grid-cols-[1.25fr_1fr]">
-            {/* LEFT — centered stack */}
+          {/* main grid */}
+          <div className="relative grid grid-cols-1 gap-6 px-8 pb-6 pt-2 md:grid-cols-[1.35fr_0.9fr]">
+            {/* BRANDING (left) */}
             <section className="flex flex-col items-center">
-              <div className="w-full max-w-[560px] text-center">
-                <h1 className="mb-4 text-[46px] font-extrabold leading-tight text-amber-300 sm:text-[58px]">
+              <div className="w-full max-w-[520px] text-center">
+                {/* smaller headline + tighter stack */}
+                <h1 className="mb-3 text-[36px] font-extrabold leading-tight text-amber-300 sm:text-[46px]">
                   Demo our AI intake experience
                 </h1>
-                <p className="mx-auto mb-6 max-w-[40ch] text-[18px] text-neutral-300">
+                <p className="mx-auto mb-5 max-w-[40ch] text-[17px] text-neutral-300">
                   Speak with our virtual assistant and experience a legal intake done right.
                 </p>
                 <button
                   onClick={start}
-                  className="mx-auto mb-8 inline-flex rounded-full bg-amber-500 px-6 py-3 text-lg font-semibold text-black shadow hover:bg-amber-400"
+                  className="mx-auto mb-7 inline-flex rounded-full bg-amber-500 px-6 py-3 text-lg font-semibold text-black shadow hover:bg-amber-400"
                 >
                   Speak with AI Assistant
                 </button>
               </div>
 
-              {/* VOICE GRID: full-bleed tiles */}
-              <div className="w-full max-w-[720px]">
-                <h3 className="mb-3 text-center text-[20px] font-semibold text-amber-100">
+              {/* voice grid — shorter and full-bleed portrait tiles */}
+              <div className="w-full max-w-[680px]">
+                <h3 className="mb-2 text-center text-[18px] font-semibold text-amber-100">
                   Choose a voice to sample
                 </h3>
-                <div className="grid grid-cols-3 gap-5">
+                <div className="grid grid-cols-3 gap-4">
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
                       <button
                         onClick={() => setVoiceId(v.id as '1' | '2' | '3')}
-                        className={`group relative aspect-[4/3] w-full overflow-hidden rounded-2xl border transition
+                        className={`group relative aspect-[3/4] w-full overflow-hidden rounded-2xl border transition
                           ${
                             voiceId === v.id
                               ? 'border-amber-400 shadow-[0_0_30px_rgba(255,200,0,0.15)]'
@@ -190,7 +169,7 @@ export default function Page() {
                         <img
                           src={v.src}
                           alt={v.name}
-                          className="h-full w-full object-cover"
+                          className="h-full w-full object-contain bg-black"
                           onError={(e) => {
                             const t = e.currentTarget as HTMLImageElement;
                             if (t.src !== FALLBACK_DATA_URI) t.src = FALLBACK_DATA_URI;
@@ -200,16 +179,16 @@ export default function Page() {
                           <div className="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-amber-400/80" />
                         )}
                       </button>
-                      <div className="mt-2 text-sm text-amber-100">{v.name}</div>
+                      <div className="mt-1 text-sm text-amber-100">{v.name}</div>
                     </div>
                   ))}
                 </div>
               </div>
             </section>
 
-            {/* RIGHT — Conversation */}
+            {/* MESSENGER (right) - narrower & taller */}
             <section className="flex justify-center">
-              <div className="flex h-[460px] w-full max-w-[520px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h-[520px] w-full max-w-[440px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
@@ -243,7 +222,7 @@ export default function Page() {
             </section>
           </div>
 
-          {/* Bottom-right quick controls */}
+          {/* quick controls */}
           <div className="relative -mt-1 flex items-center justify-end gap-3 px-8 pb-6">
             <button
               onClick={start}
