@@ -1,248 +1,287 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-// Force runtime rendering; avoid any static caching for `/`
-export const dynamic = 'force-dynamic';
-export const revalidate = false;
+/**
+ * Two-pane landing:
+ * - Left: hero + controls
+ * - Right: "Conversation" transcript area that doubles as a log console
+ *
+ * Keeps the existing smoke tests:
+ *  - WS /ws-echo (send text, expect echo)
+ *  - WS /ws-ping (server pushes "pong" every ~5s)
+ *
+ * No SSR hazards: window/location only used inside handlers/effects.
+ */
 
-type Log = { t: number; level: 'info' | 'warn' | 'error'; msg: string; meta?: any };
-
-function now() { return Math.round(performance.now()); }
-function fmt(ms: number) { return ms.toString().padStart(6, ' '); }
-
-function useLogger() {
-  const [logs, setLogs] = useState<Log[]>([]);
-  const add = useCallback((level: Log['level'], msg: string, meta?: any) => {
-    const entry: Log = { t: now(), level, msg, meta };
-    const tag = `[ui ${level}]`;
-    if (level === 'error') console.error(tag, msg, meta ?? '');
-    else if (level === 'warn') console.warn(tag, msg, meta ?? '');
-    else console.log(tag, msg, meta ?? '');
-    setLogs((l) => [...l, entry]);
-  }, []);
-  const clear = useCallback(() => setLogs([]), []);
-  return { logs, add, clear };
-}
-
-function getWSBase(): string {
-  if (typeof window === 'undefined') return '';
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}`;
-}
-
-async function wsTry(
-  url: string,
-  opts: {
-    name: string;
-    expect?: (ev: MessageEvent) => boolean;
-    onOpen?: (ws: WebSocket) => void;
-    timeoutMS?: number;
-    closeAfter?: number;
-    logger: (level: Log['level'], msg: string, meta?: any) => void;
-  }
-): Promise<void> {
-  const { name, onOpen, expect, timeoutMS = 4000, closeAfter = 0, logger } = opts;
-  logger('info', `[try] ${name} -> ${url}`);
-  const started = now();
-
-  return new Promise<void>((resolve, reject) => {
-    let done = false;
-    let to: any = null;
-
-    const finish = (ok: boolean, why?: any, ws?: WebSocket) => {
-      if (done) return;
-      done = true;
-      clearTimeout(to);
-      try { ws?.close(); } catch {}
-      const dur = now() - started;
-      if (ok) logger('info', `[ok] ${name} in ${dur}ms`);
-      else logger('error', `[fail] ${name} in ${dur}ms`, why);
-      ok ? resolve() : reject(why);
-    };
-
-    const ws = new WebSocket(url);
-
-    to = setTimeout(() => finish(false, new Error(`timeout ${timeoutMS}ms`), ws), timeoutMS);
-
-    ws.onopen = () => {
-      logger('info', `[open] ${name}`);
-      try { onOpen?.(ws); } catch (e) { finish(false, e, ws); }
-    };
-    ws.onerror = (e) => finish(false, e, ws);
-    ws.onmessage = (e) => {
-      logger('info', `[msg] ${name}`, typeof e.data);
-      if (!expect) { finish(true, null, ws); return; }
-      let ok = false;
-      try { ok = expect(e); } catch (er) { finish(false, er, ws); return; }
-      if (ok) {
-        if (closeAfter > 0) setTimeout(() => finish(true, null, ws), closeAfter);
-        else finish(true, null, ws);
-      }
-    };
-    ws.onclose = (e) => logger('warn', `[close] ${name}`, { code: e.code, reason: e.reason, clean: e.wasClean });
-  });
-}
+type LogLevel = 'info' | 'ok' | 'warn' | 'error';
+type LogLine = { t: string; level: LogLevel; msg: string };
 
 export default function Page() {
-  const { logs, add, clear } = useLogger();
-  const runningRef = useRef(false);
-  const liveWS = useRef<WebSocket | null>(null);
+  // ---- log state ----
+  const [logs, setLogs] = useState<LogLine[]>([]);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
 
-  const [voiceId, setVoiceId] = useState<number>(2);
-  const [base, setBase] = useState('');
-  useEffect(() => { setBase(getWSBase()); }, []);
+  const pushLog = (level: LogLevel, msg: string) => {
+    const now = new Date();
+    setLogs((prev) => [
+      ...prev,
+      {
+        t: now.toLocaleTimeString(),
+        level,
+        msg,
+      },
+    ]);
+  };
 
-  const urls = useMemo(() => {
-    if (!base) return null;
-    return {
-      echo: `${base}/ws-echo`,
-      ping: `${base}/ws-ping`,
-      demo: (v: number) => `${base}/web-demo/ws?voiceId=${v}`,
-    };
-  }, [base]);
+  useEffect(() => {
+    // autoscroll to the newest entry
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
-  const stop = useCallback(() => {
-    try { liveWS.current?.close(); } catch {}
-    liveWS.current = null;
-    add('warn', `Stopped`);
-  }, [add]);
+  const clearLogs = () => setLogs([]);
 
-  const start = useCallback(async () => {
-    if (!urls) { add('warn', 'Waiting for client to mount (no WS base yet)…'); return; }
-    if (runningRef.current) return;
-    runningRef.current = true;
-    clear();
-    add('info', `Connecting → ${urls.demo(voiceId)}`);
+  // ---- ws refs ----
+  const echoRef = useRef<WebSocket | null>(null);
+  const pingRef = useRef<WebSocket | null>(null);
 
-    try {
-      await wsTry(urls.echo, {
-        name: 'ws-echo',
-        onOpen: (ws) => ws.send(new Blob([new Uint8Array([1,2,3,4])])),
-        expect: () => true,
-        timeoutMS: 4000,
-        closeAfter: 50,
-        logger: add,
-      });
+  // Derive WebSocket base url safely on the client.
+  const wsBase = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    const isHttps = window.location.protocol === 'https:';
+    const scheme = isHttps ? 'wss' : 'ws';
+    return `${scheme}://${window.location.host}`;
+  }, []);
 
-      await wsTry(urls.ping, {
-        name: 'ws-ping',
-        expect: (e) => (typeof e.data === 'string' && e.data.toLowerCase().includes('pong')),
-        timeoutMS: 6000,
-        logger: add,
-      });
+  // ---- echo helpers ----
+  const connectEcho = () => {
+    if (!wsBase) return;
+    // close any existing
+    echoRef.current?.close();
 
-      const ws = new WebSocket(urls.demo(voiceId));
-      liveWS.current = ws;
-      ws.onopen = () => add('info', `WS open`);
-      ws.onmessage = (e) => {
-        const kind = typeof e.data;
-        if (kind === 'string') add('info', `msg: "${e.data.slice(0, 120)}"`);
-        else add('info', `msg: [${kind}]`);
-      };
-      ws.onerror = (e) => add('error', `WS error`, e);
-      ws.onclose = (e) => add('warn', `WS close code=${e.code} reason="${e.reason}" clean=${e.wasClean}`);
-    } catch (e) {
-      add('error', `Preflight failed`, e);
-    } finally {
-      runningRef.current = false;
+    const url = `${wsBase}/ws-echo`;
+    const ws = new WebSocket(url);
+    echoRef.current = ws;
+
+    ws.onopen = () => pushLog('ok', `[echo] open → ${url}`);
+    ws.onmessage = (ev) =>
+      pushLog('ok', `[echo] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'} `);
+    ws.onerror = (ev: any) => pushLog('error', `[echo] error: ${ev?.message ?? 'unknown'}`);
+    ws.onclose = () => pushLog('warn', `[echo] closed`);
+  };
+
+  const sendEcho = () => {
+    const ws = echoRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      pushLog('warn', '[echo] not connected');
+      return;
     }
-  }, [urls, voiceId, add, clear]);
+    const payload = `hello from smoke test @ ${new Date().toISOString()}`;
+    ws.send(payload);
+    pushLog('info', `[echo] sent → "${payload}"`);
+  };
+
+  const closeEcho = () => {
+    echoRef.current?.close();
+    echoRef.current = null;
+  };
+
+  // ---- ping helpers ----
+  const connectPing = () => {
+    if (!wsBase) return;
+    // close any existing
+    pingRef.current?.close();
+
+    const url = `${wsBase}/ws-ping`;
+    const ws = new WebSocket(url);
+    pingRef.current = ws;
+
+    ws.onopen = () => pushLog('ok', `[ping] open → ${url}`);
+    ws.onmessage = (ev) =>
+      pushLog('ok', `[ping] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'}`);
+    ws.onerror = (ev: any) => pushLog('error', `[ping] error: ${ev?.message ?? 'unknown'}`);
+    ws.onclose = () => pushLog('warn', `[ping] closed`);
+  };
+
+  const closePing = () => {
+    pingRef.current?.close();
+    pingRef.current = null;
+  };
+
+  // ---- combined controls ----
+  const startSmokeTest = () => {
+    connectEcho();
+    connectPing();
+    // send an initial echo after a short tick so OPEN has time to fire
+    setTimeout(() => sendEcho(), 200);
+  };
+
+  const stopSmokeTest = () => {
+    closeEcho();
+    closePing();
+  };
+
+  // Basic connection indicators
+  const echoState = echoRef.current?.readyState;
+  const pingState = pingRef.current?.readyState;
+
+  const readyLabel = (rs?: number) =>
+    rs === WebSocket.OPEN
+      ? 'OPEN'
+      : rs === WebSocket.CONNECTING
+      ? 'CONNECTING'
+      : rs === WebSocket.CLOSING
+      ? 'CLOSING'
+      : rs === WebSocket.CLOSED
+      ? 'CLOSED'
+      : '—';
 
   return (
-    <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-7xl px-6 py-10">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* LEFT: hero */}
-          <section>
-            <div className="flex items-center gap-3 mb-10">
-              <div className="h-10 w-10 grid place-items-center rounded-full bg-emerald-400/20 text-emerald-300 font-bold">C</div>
-              <div className="leading-tight">
-                <div className="text-xl font-semibold">CASE</div>
-                <div className="text-xl font-semibold text-emerald-300">CONNECT</div>
-              </div>
+    <main className="min-h-screen bg-neutral-950 text-neutral-100">
+      {/* max width wrapper */}
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-6 md:flex-row md:gap-8 md:p-10">
+        {/* LEFT: HERO */}
+        <section className="md:w-1/2">
+          <div className="space-y-6">
+            <div>
+              <span className="inline-block rounded-full bg-neutral-800 px-3 py-1 text-xs tracking-wide text-neutral-300">
+                Baseline · Node + Next.js · Render
+              </span>
+              <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-5xl">
+                Voice Intake, done right.
+              </h1>
+              <p className="mt-3 max-w-prose text-neutral-300">
+                This is the baseline shell we’ll extend with audio worklets and a Deepgram bridge.
+                For now, use the smoke tests to verify the WebSocket layer on{' '}
+                <span className="font-mono text-neutral-200">
+                  /ws-echo
+                </span>{' '}
+                and{' '}
+                <span className="font-mono text-neutral-200">
+                  /ws-ping
+                </span>
+                .
+              </p>
             </div>
 
-            <h1 className="text-5xl font-extrabold tracking-tight mb-6">
-              Demo our AI intake experience
-            </h1>
-            <p className="text-zinc-300 max-w-prose mb-8">
-              Speak with our virtual assistant and experience a legal intake done right.
-            </p>
-
-            <div className="flex gap-3 mb-10">
-              <button
-                onClick={start}
-                disabled={!urls}
-                className={`px-5 py-2 rounded-xl font-semibold ${
-                  !urls
-                    ? 'bg-zinc-700 cursor-not-allowed text-zinc-300'
-                    : 'bg-amber-400 text-black hover:brightness-95'
-                }`}
-              >
-                Speak with AI Assistant
-              </button>
-            </div>
-
-            <div className="mb-3 text-sm text-zinc-400">Choose a voice to sample</div>
-            <div className="grid grid-cols-3 gap-4">
-              {[1,2,3].map((v) => (
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4">
+              <h2 className="mb-3 text-lg font-semibold">Smoke test controls</h2>
+              <div className="flex flex-wrap gap-3">
                 <button
-                  key={v}
-                  onClick={() => setVoiceId(v)}
-                  className={`rounded-2xl border p-6 aspect-square grid place-items-center ${
-                    voiceId === v ? 'border-emerald-400 bg-emerald-400/10' : 'border-zinc-700 hover:border-zinc-500'
-                  }`}
+                  onClick={startSmokeTest}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 font-medium hover:bg-emerald-500"
                 >
-                  <div className="text-3xl font-bold text-emerald-300">{v}</div>
+                  Start smoke test
                 </button>
-              ))}
-            </div>
-
-            <div className="mt-6">
-              <a href="/" className="text-sm text-emerald-300 hover:underline">WebSocket smoke page →</a>
-            </div>
-          </section>
-
-          {/* RIGHT: log panel */}
-          <section className="rounded-2xl bg-zinc-900 border border-zinc-800 p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <div className="font-semibold">Conversation</div>
-                <div className="text-xs text-zinc-400">Live transcript.</div>
+                <button
+                  onClick={stopSmokeTest}
+                  className="rounded-lg bg-rose-600 px-4 py-2 font-medium hover:bg-rose-500"
+                >
+                  Stop
+                </button>
+                <button
+                  onClick={connectEcho}
+                  className="rounded-lg bg-neutral-800 px-4 py-2 font-medium hover:bg-neutral-700"
+                >
+                  Connect echo
+                </button>
+                <button
+                  onClick={sendEcho}
+                  className="rounded-lg bg-neutral-800 px-4 py-2 font-medium hover:bg-neutral-700"
+                >
+                  Send echo
+                </button>
+                <button
+                  onClick={connectPing}
+                  className="rounded-lg bg-neutral-800 px-4 py-2 font-medium hover:bg-neutral-700"
+                >
+                  Connect ping
+                </button>
+                <button
+                  onClick={clearLogs}
+                  className="rounded-lg bg-neutral-800 px-4 py-2 font-medium hover:bg-neutral-700"
+                >
+                  Clear logs
+                </button>
               </div>
-              <div className="flex gap-2">
-                <button onClick={stop} className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700">Stop</button>
-                <button onClick={start} disabled={!urls} className={`px-4 py-1.5 rounded-lg ${!urls ? 'bg-zinc-700 text-zinc-400' : 'bg-amber-400 text-black hover:brightness-95'}`}>Start</button>
+
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-neutral-300">
+                <div className="rounded-lg border border-neutral-800 p-3">
+                  <div className="text-neutral-400">/ws-echo</div>
+                  <div className="mt-1 font-mono text-xs">
+                    state: <span className="font-semibold">{readyLabel(echoState)}</span>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-neutral-800 p-3">
+                  <div className="text-neutral-400">/ws-ping</div>
+                  <div className="mt-1 font-mono text-xs">
+                    state: <span className="font-semibold">{readyLabel(pingState)}</span>
+                  </div>
+                </div>
+                <a
+                  className="col-span-2 mt-1 inline-flex items-center justify-center rounded-lg border border-neutral-800 px-3 py-2 text-center font-medium hover:bg-neutral-800"
+                  href="/healthz"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Check /healthz
+                </a>
               </div>
             </div>
+          </div>
+        </section>
 
-            <div className="h-[520px] overflow-y-auto rounded-lg bg-black/60 p-3 font-mono text-xs leading-6">
+        {/* RIGHT: CONVERSATION / LOGS */}
+        <section className="md:w-1/2">
+          <div className="flex h-[70vh] min-h-[480px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/50">
+            <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+              <h2 className="text-lg font-semibold">Conversation</h2>
+              <span className="text-xs text-neutral-400">
+                {logs.length} {logs.length === 1 ? 'event' : 'events'}
+              </span>
+            </header>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3">
               {logs.length === 0 ? (
-                <div className="text-zinc-500">System: click Start to connect…</div>
+                <p className="select-none text-neutral-400">
+                  Logs will appear here. Click <span className="font-semibold">Start smoke test</span>.
+                </p>
               ) : (
-                logs.map((l, i) => {
-                  const color = l.level === 'error' ? 'text-rose-400'
-                             : l.level === 'warn'  ? 'text-amber-300'
-                             : 'text-emerald-300';
-                  return (
-                    <div key={i} className={color}>
-                      [{fmt(l.t)}] {l.level === 'info' ? '' : `${l.level.toUpperCase()}: `}{l.msg}{l.meta ? `  ${safeMeta(l.meta)}` : ''}
-                    </div>
-                  );
-                })
+                <ul className="space-y-1">
+                  {logs.map((l, i) => (
+                    <li key={i} className="font-mono text-xs">
+                      <span className="mr-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">
+                        {l.t}
+                      </span>
+                      <LevelPill level={l.level} />
+                      <span className="ml-2 break-words">{l.msg}</span>
+                    </li>
+                  ))}
+                </ul>
               )}
+              <div ref={logEndRef} />
             </div>
-          </section>
-        </div>
+
+            <footer className="border-t border-neutral-800 px-4 py-3 text-xs text-neutral-400">
+              Next step: wire audio worklets → Deepgram bridge. For now, verify echo/ping stability.
+            </footer>
+          </div>
+        </section>
       </div>
     </main>
   );
 }
 
-function safeMeta(m: any) {
-  try {
-    if (m instanceof Event) return `{Event type="${(m as any).type}"}`;
-    return JSON.stringify(m);
-  } catch { return String(m); }
+function LevelPill({ level }: { level: LogLevel }) {
+  const map: Record<LogLevel, string> = {
+    info: 'bg-sky-700',
+    ok: 'bg-emerald-700',
+    warn: 'bg-amber-700',
+    error: 'bg-rose-700',
+  };
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] ${map[level]}`}>
+      {level.toUpperCase()}
+    </span>
+  );
 }
