@@ -1,4 +1,4 @@
-// index.cjs — Express + Next + WS (echo/ping) — CommonJS, verbose logs
+// index.cjs — Express + Next + WS (echo/ping) — CommonJS, Express 5 safe
 
 'use strict';
 
@@ -20,19 +20,18 @@ async function start() {
     PORT,
   });
 
-  // Prepare Next
   await nextApp.prepare();
   console.log('[boot] next_ready');
 
   const app = express();
 
-  // Simple HTTP sanity endpoint (in addition to /healthz) so you can hit /echo-http
-  app.get('/echo-http', (req, res) => res.type('text/plain').send('echo-ok'));
-
-  // Health check ONLY on /healthz
+  // Health check
   app.get('/healthz', (_req, res) => res.type('text/plain').send('OK'));
 
-  // Create HTTP server so WS shares the same port
+  // Extra simple echo endpoint for sanity over HTTP
+  app.get('/echo-http', (_req, res) => res.type('text/plain').send('echo-ok'));
+
+  // Create HTTP server (so WS shares port)
   const server = http.createServer(app);
 
   // --- WebSocket endpoints ---
@@ -50,7 +49,7 @@ async function start() {
         wssPing.emit('connection', ws, req);
       });
     } else {
-      // Not one of our WS routes
+      // not one of our WS routes
       socket.destroy();
     }
   });
@@ -79,10 +78,13 @@ async function start() {
     ws.on('error', (e) => console.warn('[ws-ping] error', e?.message));
   });
 
-  // Everything else → Next.js (/, assets, app routes, etc.)
-  app.all('*', (req, res) => handle(req, res));
+  // ---- Catch-all for Next.js (Express 5 safe) ----
+  // Use a middleware with no path to avoid path-to-regexp '*' issues
+  app.use((req, res) => {
+    return handle(req, res);
+  });
 
-  // Tweak timeouts (helps on some PaaS)
+  // Timeouts (nice to have on PaaS)
   server.keepAliveTimeout = 61_000;
   server.headersTimeout = 65_000;
 
@@ -96,7 +98,6 @@ async function start() {
   });
 }
 
-// Global error traps — make sure we see anything that happens
 process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
 process.on('uncaughtException', (e) => {
   console.error('[uncaughtException]', e);
