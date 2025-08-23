@@ -1,10 +1,6 @@
-/* Tailwind v4 entry */
-@import "tailwindcss";
-
-/* optional base tweaks */
+/* minimal global styles; no Tailwind imports needed (we use CDN) */
 html, body { height: 100%; }
 body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-
