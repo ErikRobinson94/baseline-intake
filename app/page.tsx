@@ -14,9 +14,9 @@ const VOICES = [
 const FALLBACK_DATA_URI =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="640">
-      <rect width="480" height="640" rx="18" fill="#000"/>
-      <rect x="18" y="18" width="444" height="604" rx="14" fill="#10b981" opacity="0.12"/>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360">
+      <rect width="480" height="360" rx="16" fill="#000"/>
+      <rect x="14" y="14" width="452" height="332" rx="12" fill="#10b981" opacity="0.12"/>
     </svg>`
   );
 
@@ -103,18 +103,18 @@ export default function Page() {
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
-      <div className="mx-auto w-full max-w-[1200px] px-4 py-8">
-        <div className="relative rounded-[28px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_20px_60px_rgba(0,0,0,0.55)]">
+      <div className="mx-auto w-full max-w-[1150px] px-4 py-6">
+        <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
           <div
-            className="pointer-events-none absolute inset-0 rounded-[28px] opacity-30"
+            className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
             style={{
               background:
-                'radial-gradient(800px 240px at -140px -70px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(800px 260px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
+                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
             }}
           />
 
-          {/* header row */}
-          <div className="relative flex items-center justify-between px-8 pt-5">
+          {/* top bar */}
+          <div className="relative flex items-center justify-between px-7 pt-4">
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
               <div className="text-sm leading-tight">
@@ -128,39 +128,38 @@ export default function Page() {
           </div>
 
           {/* main grid */}
-          <div className="relative grid grid-cols-1 gap-6 px-8 pb-6 pt-2 md:grid-cols-[1.35fr_0.9fr]">
-            {/* BRANDING (left) */}
+          <div className="relative grid grid-cols-1 gap-5 px-7 pb-5 pt-1 md:grid-cols-[1.35fr_0.9fr]">
+            {/* LEFT: branding (shortened) */}
             <section className="flex flex-col items-center">
-              <div className="w-full max-w-[520px] text-center">
-                {/* smaller headline + tighter stack */}
-                <h1 className="mb-3 text-[36px] font-extrabold leading-tight text-amber-300 sm:text-[46px]">
+              <div className="w-full max-w-[500px] text-center">
+                <h1 className="mb-2 text-[30px] font-extrabold leading-tight text-amber-300 sm:text-[38px]">
                   Demo our AI intake experience
                 </h1>
-                <p className="mx-auto mb-5 max-w-[40ch] text-[17px] text-neutral-300">
+                <p className="mx-auto mb-4 max-w-[42ch] text-[16px] text-neutral-300">
                   Speak with our virtual assistant and experience a legal intake done right.
                 </p>
                 <button
                   onClick={start}
-                  className="mx-auto mb-7 inline-flex rounded-full bg-amber-500 px-6 py-3 text-lg font-semibold text-black shadow hover:bg-amber-400"
+                  className="mx-auto mb-6 inline-flex rounded-full bg-amber-500 px-5 py-2.5 text-[15px] font-semibold text-black shadow hover:bg-amber-400"
                 >
                   Speak with AI Assistant
                 </button>
               </div>
 
-              {/* voice grid — shorter and full-bleed portrait tiles */}
-              <div className="w-full max-w-[680px]">
-                <h3 className="mb-2 text-center text-[18px] font-semibold text-amber-100">
+              {/* voice tiles: SHORT */}
+              <div className="w-full max-w-[640px]">
+                <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">
                   Choose a voice to sample
                 </h3>
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-3 gap-3">
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
                       <button
                         onClick={() => setVoiceId(v.id as '1' | '2' | '3')}
-                        className={`group relative aspect-[3/4] w-full overflow-hidden rounded-2xl border transition
+                        className={`group relative aspect-[4/3] w-full max-h-[150px] overflow-hidden rounded-2xl border transition
                           ${
                             voiceId === v.id
-                              ? 'border-amber-400 shadow-[0_0_30px_rgba(255,200,0,0.15)]'
+                              ? 'border-amber-400 shadow-[0_0_20px_rgba(255,200,0,0.15)]'
                               : 'border-neutral-800 hover:border-neutral-700'
                           }`}
                         style={{ backgroundColor: '#000' }}
@@ -179,16 +178,16 @@ export default function Page() {
                           <div className="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-amber-400/80" />
                         )}
                       </button>
-                      <div className="mt-1 text-sm text-amber-100">{v.name}</div>
+                      <div className="mt-1 text-xs text-amber-100">{v.name}</div>
                     </div>
                   ))}
                 </div>
               </div>
             </section>
 
-            {/* MESSENGER (right) - narrower & taller */}
+            {/* RIGHT: messenger (narrower & balanced height) */}
             <section className="flex justify-center">
-              <div className="flex h-[520px] w-full max-w-[440px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
@@ -222,8 +221,8 @@ export default function Page() {
             </section>
           </div>
 
-          {/* quick controls */}
-          <div className="relative -mt-1 flex items-center justify-end gap-3 px-8 pb-6">
+          {/* bottom quick controls */}
+          <div className="relative -mt-1 flex items-center justify-end gap-3 px-7 pb-5">
             <button
               onClick={start}
               className="rounded-xl bg-amber-500 px-5 py-2 font-semibold text-black hover:bg-amber-400"
@@ -238,8 +237,8 @@ export default function Page() {
             </button>
           </div>
 
-          {/* Advanced controls */}
-          <details className="mx-8 mb-6 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
+          {/* advanced controls (kept for smoke tests) */}
+          <details className="mx-7 mb-5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
             <summary className="cursor-pointer text-sm text-neutral-300">Advanced smoke controls</summary>
             <div className="mt-3 flex flex-wrap gap-3">
               <button onClick={start} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500">
