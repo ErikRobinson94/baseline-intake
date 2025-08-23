@@ -1,117 +1,121 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 
-type Level = 'info' | 'warn' | 'error';
+type Log = { t: number; level: 'info' | 'warn' | 'error'; msg: string; meta?: any };
+
+const now = () => Math.round(performance.now());
+const fmt = (ms: number) => ms.toString().padStart(6, ' ');
+
+function useLogger() {
+  const [logs, setLogs] = useState<Log[]>([]);
+  const add = useCallback((level: Log['level'], msg: string, meta?: any) => {
+    const entry: Log = { t: now(), level, msg, meta };
+    const tag = `[ui ${level}]`;
+    if (level === 'error') console.error(tag, msg, meta ?? '');
+    else if (level === 'warn') console.warn(tag, msg, meta ?? '');
+    else console.log(tag, msg, meta ?? '');
+    setLogs((l) => [...l, entry]);
+  }, []);
+  const clear = useCallback(() => setLogs([]), []);
+  return { logs, add, clear };
+}
+
+function getWSBase(): string {
+  if (typeof window !== 'undefined') {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${location.host}`;
+  }
+  return '';
+}
+
+async function wsTry(url: string, opts: any): Promise<void> {
+  const {
+    name,
+    onOpen,
+    expect,
+    timeoutMS = 4000,
+    closeAfter = 0,
+    logger,
+  } = opts;
+
+  logger('info', `[try] ${name} -> ${url}`);
+  const started = now();
+
+  return new Promise<void>((resolve, reject) => {
+    let done = false;
+    const ws = new WebSocket(url);
+
+    const finish = (ok: boolean, why: any) => {
+      if (done) return;
+      done = true;
+      const dur = now() - started;
+      if (ok) logger('info', `[ok] ${name} in ${dur}ms`);
+      else logger('error', `[fail] ${name} in ${dur}ms`, why);
+      try { ws.close(); } catch {}
+      ok ? resolve() : reject(why);
+    };
+
+    const to = setTimeout(() => finish(false, new Error(`timeout ${timeoutMS}ms`)), timeoutMS);
+
+    ws.onopen = () => {
+      logger('info', `[open] ${name}`);
+      try { onOpen?.(ws); } catch (e) { clearTimeout(to); finish(false, e); }
+    };
+    ws.onerror = (e) => { clearTimeout(to); finish(false, e); };
+    ws.onmessage = (e) => {
+      logger('info', `[msg] ${name}`, typeof e.data);
+      if (!expect) return;
+      let ok = false;
+      try { ok = expect(e); } catch (er) { clearTimeout(to); finish(false, er); return; }
+      if (ok) {
+        if (closeAfter > 0) setTimeout(() => { clearTimeout(to); finish(true, null); }, closeAfter);
+        else { clearTimeout(to); finish(true, null); }
+      }
+    };
+    ws.onclose = (e) => logger('warn', `[close] ${name}`, { code: e.code, reason: e.reason, clean: e.wasClean });
+  });
+}
 
 export default function Page() {
-  const [logs, setLogs] = useState<string[]>([]);
-  const [running, setRunning] = useState(false);
+  const { logs, add, clear } = useLogger();
+  const runningRef = useRef(false);
+  const base = useMemo(() => getWSBase(), []);
+  const urls = useMemo(() => ({
+    echo: `${base}/ws-echo`,
+    ping: `${base}/ws-ping`,
+    demo: `${base}/web-demo/ws`,
+  }), [base]);
 
-  const add = (level: Level, msg: string, meta?: any) => {
-    const t = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()));
-    const color =
-      level === 'error' ? '#f87171' :
-      level === 'warn'  ? '#facc15' : '#86efac';
-    const line = `%c[${String(t).padStart(6,' ')}] ${msg}${meta ? '  ' + safe(meta) : ''}`;
-    // console
-    (level === 'error' ? console.error :
-     level === 'warn'  ? console.warn  : console.log)(line, `color:${color}`);
-    // ui
-    setLogs((l) => [...l, line.replace('%c','')]);
-  };
-
-  // Only compute WS base **in the browser** and only when Start is clicked.
-  const getWSBase = (): string => {
-    if (typeof window === 'undefined') return ''; // SSR: never used during build
-    const origin = process.env.NEXT_PUBLIC_BACKEND_ORIGIN;
-    if (origin) {
-      try {
-        const u = new URL(origin);
-        return `wss://${u.host}`;
-      } catch { /* ignore */ }
-    }
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}`;
-  };
-
-  const wsTry = (url: string, opts: {
-    name: string;
-    expect?: (ev: MessageEvent) => boolean;
-    onOpen?: (ws: WebSocket) => void;
-    timeoutMS?: number;
-  }) => {
-    const { name, expect, onOpen, timeoutMS = 4000 } = opts;
-    add('info', `[try] ${name} -> ${url}`);
-    const started = Date.now();
-
-    return new Promise<void>((resolve, reject) => {
-      let done = false;
-      let to: any;
-
-      const finish = (ok: boolean, why?: any) => {
-        if (done) return;
-        done = true;
-        clearTimeout(to);
-        const dur = Date.now() - started;
-        ok ? add('info', `[ok] ${name} in ${dur}ms`)
-           : add('error', `[fail] ${name} in ${dur}ms`, why);
-        ok ? resolve() : reject(why);
-      };
-
-      let ws: WebSocket;
-      try {
-        ws = new WebSocket(url);
-      } catch (e) {
-        finish(false, e);
-        return;
-      }
-
-      to = setTimeout(() => finish(false, new Error(`timeout ${timeoutMS}ms`)), timeoutMS);
-
-      ws.onopen = () => {
-        add('info', `[open] ${name}`);
-        try { onOpen?.(ws); } catch (e) { finish(false, e); }
-      };
-      ws.onerror = (e) => finish(false, e);
-      ws.onclose = (e) => add('warn', `[close] ${name}`, { code: e.code, reason: e.reason, clean: e.wasClean });
-      ws.onmessage = (e) => {
-        add('info', `[msg] ${name}`, typeof e.data);
-        if (!expect) return;
-        try {
-          if (expect(e)) finish(true);
-        } catch (er) {
-          finish(false, er);
-        }
-      };
-    });
-  };
-
-  const smoke = async () => {
-    if (running) return;
-    setRunning(true);
-    setLogs([]);
-    const base = getWSBase();
-    if (!base) { add('warn', 'Not in browser yet; try again.'); setRunning(false); return; }
-
+  const smoke = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    clear();
     add('info', `[smoke] begin`, { base });
 
     try {
-      await wsTry(`${base}/ws-echo`, {
+      await wsTry(urls.echo, {
         name: 'ws-echo',
-        onOpen: (ws) => ws.send(new Blob([new Uint8Array([1,2,3,4])])),
+        onOpen: (ws: WebSocket) => ws.send(new Blob([new Uint8Array([1, 2, 3, 4])])),
         expect: () => true,
+        timeoutMS: 4000,
+        closeAfter: 50,
+        logger: add,
       });
 
-      await wsTry(`${base}/ws-ping`, {
+      await wsTry(urls.ping, {
         name: 'ws-ping',
-        expect: (e) => (typeof e.data === 'string' && e.data.toLowerCase().includes('pong')),
+        expect: (e: MessageEvent) =>
+          typeof e.data === 'string' && e.data.toLowerCase().includes('pong'),
         timeoutMS: 6000,
+        logger: add,
       });
 
-      await wsTry(`${base}/web-demo/ws`, {
+      await wsTry(urls.demo, {
         name: 'web-demo',
-        expect: () => true,
+        expect: (e: MessageEvent) => typeof e.data === 'string',
+        timeoutMS: 4000,
+        logger: add,
       });
 
       add('info', `[smoke] ✅ ALL PASS`);
@@ -119,43 +123,60 @@ export default function Page() {
       add('error', `[smoke] ❌ FAIL`, e);
     } finally {
       add('info', `[smoke] end`);
-      setRunning(false);
+      runningRef.current = false;
     }
-  };
+  }, [urls, add, clear]);
 
   return (
-    <main style={{ minHeight: '100vh', background:'#0b0b0c', color:'#fff', padding:'24px' }}>
-      <div style={{ maxWidth: 960, margin: '0 auto' }}>
-        <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>WebSocket smoke test</h1>
-        <p style={{ opacity: 0.7, fontSize: 14, marginBottom: 16 }}>
+    <main className="min-h-screen p-6" style={{ background: '#0b0b0b', color: 'white' }}>
+      <div className="max-w-5xl mx-auto" style={{ display: 'grid', gap: '1rem' }}>
+        <h1 style={{ fontSize: 32, fontWeight: 800 }}>WebSocket smoke test</h1>
+        <p style={{ color: '#aaa' }}>
           Click Start to run echo / ping / demo checks against your backend.
         </p>
 
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 12 }}>
           <button
             onClick={smoke}
-            disabled={running}
             style={{
-              padding: '10px 16px', borderRadius: 12,
-              background: running ? '#999' : '#facc15',
-              color: '#000', fontWeight: 700, cursor: running ? 'not-allowed' : 'pointer'
+              padding: '10px 14px',
+              borderRadius: 12,
+              background: '#facc15',
+              color: '#111',
+              fontWeight: 700,
             }}
           >
-            {running ? 'Running…' : 'Start (run smoke test)'}
+            Start (run smoke test)
           </button>
           <button
-            onClick={() => setLogs([])}
-            style={{ padding: '10px 16px', borderRadius: 12, background: '#222', color: '#ddd' }}
+            onClick={clear}
+            style={{ padding: '10px 14px', borderRadius: 12, background: '#27272a', color: 'white' }}
           >
             Clear
           </button>
         </div>
 
-        <section style={{ borderRadius: 12, background:'#111', border:'1px solid #222', padding:12 }}>
-          <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', fontSize:12, lineHeight:'22px', whiteSpace:'pre-wrap' }}>
-            {logs.length === 0
-              ? <div style={{ color:'#888' }}>Logs will appear here…</div>
-              : logs.map((l, i) => <div key={i}>{l}</div>)}
+        <section style={{ border: '1px solid #27272a', background: '#18181b', borderRadius: 12, padding: 12 }}>
+          <div
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              fontSize: 12,
+              lineHeight: '1.6',
+            }}
+          >
+            {logs.length === 0 ? (
+              <div style={{ color: '#71717a' }}>Logs will appear here…</div>
+            ) : (
+              logs.map((l, i) => {
+                const color = l.level === 'error' ? '#fca5a5' : l.level === 'warn' ? '#fde68a' : '#86efac';
+                const meta = l.meta ? `  ${safeMeta(l.meta)}` : '';
+                return (
+                  <div key={i} style={{ color }}>
+                    {`[${fmt(l.t)}] ${l.msg}${meta}`}
+                  </div>
+                );
+              })
+            )}
           </div>
         </section>
       </div>
@@ -163,11 +184,11 @@ export default function Page() {
   );
 }
 
-function safe(x: any) {
+function safeMeta(m: any) {
   try {
-    if (x instanceof Event) return `{Event type="${(x as any).type}"}`;
-    return JSON.stringify(x);
+    if (m instanceof Event) return `{Event type="${(m as any).type}"}`;
+    return JSON.stringify(m);
   } catch {
-    return String(x);
+    return String(m);
   }
 }
