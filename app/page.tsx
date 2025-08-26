@@ -44,13 +44,41 @@ export default function Page() {
   const wsRef = useRef<WebSocket|null>(null);
   const startedRef = useRef(false);
 
+  /** Robustly load worklet modules via Blob URLs to avoid MIME/404 quirks. */
   async function ensureAudioGraph(){
     if (audioRef.current) return;
-    const ac = new AudioContext({ sampleRate: 48000 });
-    await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
-    await ac.audioWorklet.addModule('/worklets/pcm-player.js');
-    const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
+
+    const ac = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 48000 });
+
+    async function loadWorklet(urlPath: string) {
+      const abs = new URL(urlPath + `?v=${Date.now()}`, window.location.origin).toString();
+      try {
+        const res = await fetch(abs, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${abs}`);
+        const code = await res.text();
+        const blob = new Blob([code], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        await ac.audioWorklet.addModule(blobUrl);
+        pushLog('ok', `worklet loaded: ${urlPath}`);
+      } catch (e:any) {
+        console.error('[worklet] load failed', urlPath, e);
+        pushLog('error', `worklet load failed: ${urlPath} → ${e?.message||e}`);
+        throw e;
+      }
+    }
+
+    await loadWorklet('/worklets/pcm-processor.js');
+    await loadWorklet('/worklets/pcm-player.js');
+
+    let player: AudioWorkletNode;
+    try {
+      player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
+    } catch (e:any) {
+      pushLog('error', `create player failed: ${e?.message||e}`);
+      throw e;
+    }
     player.connect(ac.destination);
+
     audioRef.current = ac;
     playerNodeRef.current = player;
   }
@@ -68,14 +96,31 @@ export default function Page() {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    await ensureAudioGraph();
+    try {
+      await ensureAudioGraph();
+    } catch (e) {
+      startedRef.current = false;
+      return;
+    }
+
     const ac = audioRef.current!;
-    if (ac.state === 'suspended') await ac.resume();
+    if (ac.state === 'suspended') {
+      try { await ac.resume(); } catch {}
+    }
 
     // get mic
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true }, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 48000,
+          echoCancellation: true,
+          noiseSuppression: true
+        },
+        video: false
+      });
+      pushLog('ok', 'mic granted');
     } catch (e:any) {
       pushLog('error', `No mic: ${e?.message||e}`);
       startedRef.current = false;
@@ -84,7 +129,14 @@ export default function Page() {
 
     // build mic → encoder
     const mic = ac.createMediaStreamSource(stream);
-    const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs:1, numberOfOutputs:0 });
+    let enc: AudioWorkletNode;
+    try {
+      enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs:1, numberOfOutputs:0 });
+    } catch (e:any) {
+      pushLog('error', `create encoder failed: ${e?.message||e}`);
+      startedRef.current = false;
+      return;
+    }
     mic.connect(enc);
     micNodeRef.current = mic;
     encNodeRef.current = enc;
@@ -98,7 +150,8 @@ export default function Page() {
       setConnected(true);
       setUiState('Connected');
       pushLog('ok', `WS open ${url}`);
-      ws.send(JSON.stringify({ type:'start', voiceId }));
+      try { ws.send(JSON.stringify({ type:'start', voiceId })); } catch {}
+
       // pump mic frames to server as binary PCM16
       enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -250,7 +303,7 @@ export default function Page() {
             </section>
 
             <section className="flex justify-center">
-              <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h-[440px] w-full max-w={[420]} flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
