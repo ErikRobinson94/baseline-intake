@@ -18,17 +18,17 @@ const FALLBACK_DATA_URI =
   );
 
 type Level = 'info' | 'ok' | 'warn' | 'error';
-function nowStr(){ return new Date().toLocaleTimeString(); }
+const nowStr = () => new Date().toLocaleTimeString();
 
 export default function Page() {
   const [voiceId, setVoiceId] = useState('2');
   const [connected, setConnected] = useState(false);
   const [uiState, setUiState] = useState<'Disconnected' | 'Connected' | 'Listening' | 'Speaking'>('Disconnected');
 
-  const [logs, setLogs] = useState<{t:string, level:Level, msg:string}[]>([]);
-  const pushLog = (level:Level, msg:string) => setLogs((p)=>[...p,{t:nowStr(), level, msg}]);
-  const logEndRef = useRef<HTMLDivElement|null>(null);
-  useEffect(()=>{ logEndRef.current?.scrollIntoView({behavior:'smooth'}); }, [logs]);
+  const [logs, setLogs] = useState<{ t: string; level: Level; msg: string }[]>([]);
+  const pushLog = (level: Level, msg: string) => setLogs((p) => [...p, { t: nowStr(), level, msg }]);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -37,20 +37,20 @@ export default function Page() {
   }, []);
 
   // audio graph refs
-  const audioRef = useRef<AudioContext|null>(null);
-  const micNodeRef = useRef<MediaStreamAudioSourceNode|null>(null);
-  const encNodeRef = useRef<AudioWorkletNode|null>(null);
-  const playerNodeRef = useRef<AudioWorkletNode|null>(null);
-  const wsRef = useRef<WebSocket|null>(null);
+  const audioRef = useRef<AudioContext | null>(null);
+  const micNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const encNodeRef = useRef<AudioWorkletNode | null>(null);
+  const playerNodeRef = useRef<AudioWorkletNode | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const startedRef = useRef(false);
 
-  /** Robustly load worklet modules via Blob URLs to avoid MIME/404 quirks. */
-  async function ensureAudioGraph(){
+  /** Robust: fetch→Blob→addModule; create nodes immediately to verify names are registered */
+  async function ensureAudioGraph() {
     if (audioRef.current) return;
 
     const ac = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 48000 });
 
-    async function loadWorklet(urlPath: string) {
+    async function loadWorklet(urlPath: string, nameForLog: string) {
       const abs = new URL(urlPath + `?v=${Date.now()}`, window.location.origin).toString();
       try {
         const res = await fetch(abs, { cache: 'no-store' });
@@ -59,46 +59,55 @@ export default function Page() {
         const blob = new Blob([code], { type: 'text/javascript' });
         const blobUrl = URL.createObjectURL(blob);
         await ac.audioWorklet.addModule(blobUrl);
-        pushLog('ok', `worklet loaded: ${urlPath}`);
-      } catch (e:any) {
+        pushLog('ok', `worklet loaded: ${nameForLog}`);
+      } catch (e: any) {
         console.error('[worklet] load failed', urlPath, e);
-        pushLog('error', `worklet load failed: ${urlPath} → ${e?.message||e}`);
+        pushLog('error', `worklet load failed: ${nameForLog} → ${e?.message || e}`);
         throw e;
       }
     }
 
-    await loadWorklet('/worklets/pcm-processor.js');
-    await loadWorklet('/worklets/pcm-player.js');
+    // Load both modules
+    await loadWorklet('/worklets/pcm-processor.js', 'pcm-processor');
+    await loadWorklet('/worklets/pcm-player.js', 'pcm-player');
 
+    // Create nodes NOW (so we fail here if names aren’t registered)
     let player: AudioWorkletNode;
+    let encoder: AudioWorkletNode;
     try {
       player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
-    } catch (e:any) {
-      pushLog('error', `create player failed: ${e?.message||e}`);
+      // Use 1 dummy output to keep the render thread happy even if unconnected
+      encoder = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      pushLog('ok', 'worklet nodes created');
+    } catch (e: any) {
+      pushLog('error', `create nodes failed: ${e?.message || e}`);
       throw e;
     }
+
+    // Route player to destination
     player.connect(ac.destination);
 
     audioRef.current = ac;
     playerNodeRef.current = player;
+    encNodeRef.current = encoder;
   }
 
   function pcm16ToFloat32(pcm16: Int16Array): Float32Array {
     const out = new Float32Array(pcm16.length);
-    for (let i=0;i<pcm16.length;i++){
+    for (let i = 0; i < pcm16.length; i++) {
       const s = pcm16[i];
-      out[i] = (s < 0 ? s / 0x8000 : s / 0x7FFF);
+      out[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
     }
     return out;
   }
 
-  async function startVoice(){
+  async function startVoice() {
     if (startedRef.current) return;
     startedRef.current = true;
 
     try {
       await ensureAudioGraph();
-    } catch (e) {
+    } catch {
       startedRef.current = false;
       return;
     }
@@ -112,34 +121,20 @@ export default function Page() {
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 48000,
-          echoCancellation: true,
-          noiseSuppression: true
-        },
-        video: false
+        audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true },
+        video: false,
       });
       pushLog('ok', 'mic granted');
-    } catch (e:any) {
-      pushLog('error', `No mic: ${e?.message||e}`);
+    } catch (e: any) {
+      pushLog('error', `No mic: ${e?.message || e}`);
       startedRef.current = false;
       return;
     }
 
-    // build mic → encoder
+    // wire mic → encoder (node already exists)
     const mic = ac.createMediaStreamSource(stream);
-    let enc: AudioWorkletNode;
-    try {
-      enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs:1, numberOfOutputs:0 });
-    } catch (e:any) {
-      pushLog('error', `create encoder failed: ${e?.message||e}`);
-      startedRef.current = false;
-      return;
-    }
-    mic.connect(enc);
+    mic.connect(encNodeRef.current!);
     micNodeRef.current = mic;
-    encNodeRef.current = enc;
 
     // open WS to /audio-stream
     const url = `${wsBase}/audio-stream`;
@@ -150,10 +145,10 @@ export default function Page() {
       setConnected(true);
       setUiState('Connected');
       pushLog('ok', `WS open ${url}`);
-      try { ws.send(JSON.stringify({ type:'start', voiceId })); } catch {}
+      try { ws.send(JSON.stringify({ type: 'start', voiceId })); } catch {}
 
       // pump mic frames to server as binary PCM16
-      enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+      encNodeRef.current!.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
         if (ws.readyState === WebSocket.OPEN) {
           try { ws.send(ev.data); } catch {}
         }
@@ -168,11 +163,7 @@ export default function Page() {
             setUiState(msg.state);
             pushLog('info', `state → ${msg.state}`);
           } else if (msg.type === 'transcript') {
-            const text =
-              msg.payload?.text ||
-              msg.payload?.transcript ||
-              msg.payload?.content ||
-              '';
+            const text = msg.payload?.text || msg.payload?.transcript || msg.payload?.content || '';
             if (text) pushLog('info', `asr: ${text}`);
           } else if (msg.type === 'error') {
             pushLog('warn', `provider error: ${msg.error?.message || 'unknown'}`);
@@ -204,25 +195,22 @@ export default function Page() {
     wsRef.current = ws;
   }
 
-  function stopVoice(){
-    try { wsRef.current?.send(JSON.stringify({ type:'stop' })); } catch {}
+  function stopVoice() {
+    try { wsRef.current?.send(JSON.stringify({ type: 'stop' })); } catch {}
     try { wsRef.current?.close(); } catch {}
     wsRef.current = null;
-    if (encNodeRef.current) { try { encNodeRef.current.disconnect(); } catch {} encNodeRef.current = null; }
-    if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} micNodeRef.current = null; }
+
+    if (encNodeRef.current) { try { encNodeRef.current.disconnect(); } catch {} }
+    if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} }
+    micNodeRef.current = null;
+
     startedRef.current = false;
     setConnected(false);
     setUiState('Disconnected');
   }
 
-  const start = () => { startVoice().catch((e)=>pushLog('error', String(e))); };
-  const stop  = () => { stopVoice(); };
-
-  const readyLabel = (rs?: number) =>
-    rs === WebSocket.OPEN ? 'OPEN' :
-    rs === WebSocket.CONNECTING ? 'CONNECTING' :
-    rs === WebSocket.CLOSING ? 'CLOSING' :
-    rs === WebSocket.CLOSED ? 'CLOSED' : '—';
+  const start = () => { startVoice().catch((e) => pushLog('error', String(e))); };
+  const stop = () => { stopVoice(); };
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
@@ -230,8 +218,10 @@ export default function Page() {
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
           <div
             className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
-            style={{ background:
-              'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)' }}
+            style={{
+              background:
+                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
+            }}
           />
 
           <div className="relative flex items-center justify-end px-7 pt-4">
@@ -241,6 +231,7 @@ export default function Page() {
           </div>
 
           <div className="relative grid grid-cols-1 gap-5 px-7 pb-5 pt-1 md:grid-cols-[1.35fr_0.9fr]">
+            {/* LEFT */}
             <section className="flex flex-col items-center">
               <div className="mb-3 flex items-center justify-center gap-3 whitespace-nowrap">
                 <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
@@ -265,9 +256,7 @@ export default function Page() {
               </div>
 
               <div className="w-full max-w-[860px]">
-                <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">
-                  Choose a voice to sample
-                </h3>
+                <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">Choose a voice to sample</h3>
                 <div className="grid grid-cols-3 gap-4">
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
@@ -291,9 +280,7 @@ export default function Page() {
                             if (t.src !== FALLBACK_DATA_URI) t.src = FALLBACK_DATA_URI;
                           }}
                         />
-                        {voiceId === v.id && (
-                          <div className="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-amber-400/80" />
-                        )}
+                        {voiceId === v.id && <div className="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-amber-400/80" />}
                       </button>
                       <div className="mt-1 text-xs text-amber-100">{v.name}</div>
                     </div>
@@ -302,8 +289,9 @@ export default function Page() {
               </div>
             </section>
 
+            {/* RIGHT */}
             <section className="flex justify-center">
-              <div className="flex h-[440px] w-full max-w={[420]} flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
@@ -319,9 +307,7 @@ export default function Page() {
                     <ul className="space-y-1">
                       {logs.map((l, i) => (
                         <li key={i} className="font-mono text-xs">
-                          <span className="mr-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">
-                            {l.t}
-                          </span>
+                          <span className="mr-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">{l.t}</span>
                           <LevelPill level={l.level as any} />
                           <span className="ml-2 break-words">{l.msg}</span>
                         </li>
@@ -338,21 +324,14 @@ export default function Page() {
           </div>
 
           <div className="relative -mt-1 flex items-center justify-end gap-3 px-7 pb-5">
-            <button
-              onClick={start}
-              className="rounded-xl bg-amber-500 px-5 py-2 font-semibold text-black hover:bg-amber-400"
-            >
+            <button onClick={start} className="rounded-xl bg-amber-500 px-5 py-2 font-semibold text-black hover:bg-amber-400">
               Start
             </button>
-            <button
-              onClick={stop}
-              className="rounded-xl bg-neutral-800 px-5 py-2 font-semibold hover:bg-neutral-700"
-            >
+            <button onClick={stop} className="rounded-xl bg-neutral-800 px-5 py-2 font-semibold hover:bg-neutral-700">
               Stop
             </button>
           </div>
 
-          {/* advanced (keep) */}
           <details className="mx-7 mb-5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
             <summary className="cursor-pointer text-sm text-neutral-300">Advanced smoke controls</summary>
             <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-neutral-300">
@@ -379,13 +358,6 @@ export default function Page() {
 }
 
 function LevelPill({ level }: { level: 'info' | 'ok' | 'warn' | 'error' }) {
-  const color =
-    level === 'info'
-      ? 'bg-sky-700'
-      : level === 'ok'
-      ? 'bg-emerald-700'
-      : level === 'warn'
-      ? 'bg-amber-700'
-      : 'bg-rose-700';
+  const color = level === 'info' ? 'bg-sky-700' : level === 'ok' ? 'bg-emerald-700' : level === 'warn' ? 'bg-amber-700' : 'bg-rose-700';
   return <span className={`rounded px-1.5 py-0.5 text-[10px] ${color}`}>{level.toUpperCase()}</span>;
 }
