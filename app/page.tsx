@@ -2,14 +2,11 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-type LogLevel = 'info' | 'ok' | 'warn' | 'error';
-type LogLine = { t: string; level: LogLevel; msg: string };
-
 const VOICES = [
   { id: '1', name: 'Voice 1', src: '/voices/voice1.png' },
   { id: '2', name: 'Voice 2', src: '/voices/voice2.png' },
   { id: '3', name: 'Voice 3', src: '/voices/voice3.png' },
-] as const;
+];
 
 const FALLBACK_DATA_URI =
   'data:image/svg+xml;utf8,' +
@@ -20,136 +17,190 @@ const FALLBACK_DATA_URI =
     </svg>`
   );
 
+type Level = 'info' | 'ok' | 'warn' | 'error';
+function nowStr(){ return new Date().toLocaleTimeString(); }
+
 export default function Page() {
-  const [voiceId, setVoiceId] = useState<'1' | '2' | '3'>('2');
+  const [voiceId, setVoiceId] = useState('2');
   const [connected, setConnected] = useState(false);
+  const [uiState, setUiState] = useState<'Disconnected' | 'Connected' | 'Listening' | 'Speaking'>('Disconnected');
 
-  const [logs, setLogs] = useState<LogLine[]>([]);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
-  const pushLog = (level: LogLevel, msg: string) =>
-    setLogs((prev) => [...prev, { t: new Date().toLocaleTimeString(), level, msg }]);
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  const [logs, setLogs] = useState<{t:string, level:Level, msg:string}[]>([]);
+  const pushLog = (level:Level, msg:string) => setLogs((p)=>[...p,{t:nowStr(), level, msg}]);
+  const logEndRef = useRef<HTMLDivElement|null>(null);
+  useEffect(()=>{ logEndRef.current?.scrollIntoView({behavior:'smooth'}); }, [logs]);
 
-  const echoRef = useRef<WebSocket | null>(null);
-  const pingRef = useRef<WebSocket | null>(null);
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
     const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
     return `${scheme}://${window.location.host}`;
   }, []);
 
-  const connectEcho = () => {
-    if (!wsBase) return;
-    echoRef.current?.close();
-    const url = `${wsBase}/ws-echo`;
-    const ws = new WebSocket(url);
-    echoRef.current = ws;
-    ws.onopen = () => pushLog('ok', `[echo] open → ${url}`);
-    ws.onmessage = (ev) =>
-      pushLog('ok', `[echo] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'}`);
-    ws.onerror = (e: any) => pushLog('error', `[echo] error: ${e?.message ?? 'unknown'}`);
-    ws.onclose = () => pushLog('warn', `[echo] closed`);
-  };
-  const sendEcho = () => {
-    const ws = echoRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      pushLog('warn', '[echo] not connected');
+  // audio graph refs
+  const audioRef = useRef<AudioContext|null>(null);
+  const micNodeRef = useRef<MediaStreamAudioSourceNode|null>(null);
+  const encNodeRef = useRef<AudioWorkletNode|null>(null);
+  const playerNodeRef = useRef<AudioWorkletNode|null>(null);
+  const wsRef = useRef<WebSocket|null>(null);
+  const startedRef = useRef(false);
+
+  async function ensureAudioGraph(){
+    if (audioRef.current) return;
+    const ac = new AudioContext({ sampleRate: 48000 });
+    await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
+    await ac.audioWorklet.addModule('/worklets/pcm-player.js');
+    const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
+    player.connect(ac.destination);
+    audioRef.current = ac;
+    playerNodeRef.current = player;
+  }
+
+  function pcm16ToFloat32(pcm16: Int16Array): Float32Array {
+    const out = new Float32Array(pcm16.length);
+    for (let i=0;i<pcm16.length;i++){
+      const s = pcm16[i];
+      out[i] = (s < 0 ? s / 0x8000 : s / 0x7FFF);
+    }
+    return out;
+  }
+
+  async function startVoice(){
+    if (startedRef.current) return;
+    startedRef.current = true;
+
+    await ensureAudioGraph();
+    const ac = audioRef.current!;
+    if (ac.state === 'suspended') await ac.resume();
+
+    // get mic
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true }, video: false });
+    } catch (e:any) {
+      pushLog('error', `No mic: ${e?.message||e}`);
+      startedRef.current = false;
       return;
     }
-    const payload = JSON.stringify({ type: 'hello', voiceId });
-    ws.send(payload);
-    pushLog('info', `[echo] sent → ${payload}`);
-  };
-  const connectPing = () => {
-    if (!wsBase) return;
-    pingRef.current?.close();
-    const url = `${wsBase}/ws-ping`;
-    const ws = new WebSocket(url);
-    pingRef.current = ws;
-    ws.onopen = () => pushLog('ok', `[ping] open → ${url}`);
-    ws.onmessage = (ev) =>
-      pushLog('ok', `[ping] message ← ${typeof ev.data === 'string' ? ev.data : '[binary]'} (pong)`);
-    ws.onerror = (e: any) => pushLog('error', `[ping] error: ${e?.message ?? 'unknown'}`);
-    ws.onclose = () => pushLog('warn', `[ping] closed`);
-  };
-  const start = () => {
-    connectEcho();
-    connectPing();
-    setConnected(true);
-    setTimeout(() => sendEcho(), 200);
-  };
-  const stop = () => {
-    echoRef.current?.close();
-    pingRef.current?.close();
-    echoRef.current = null;
-    pingRef.current = null;
-    setConnected(false);
-  };
 
-  const echoState = echoRef.current?.readyState;
-  const pingState = pingRef.current?.readyState;
+    // build mic → encoder
+    const mic = ac.createMediaStreamSource(stream);
+    const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs:1, numberOfOutputs:0 });
+    mic.connect(enc);
+    micNodeRef.current = mic;
+    encNodeRef.current = enc;
+
+    // open WS to /audio-stream
+    const url = `${wsBase}/audio-stream`;
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      setConnected(true);
+      setUiState('Connected');
+      pushLog('ok', `WS open ${url}`);
+      ws.send(JSON.stringify({ type:'start', voiceId }));
+      // pump mic frames to server as binary PCM16
+      enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(ev.data); } catch {}
+        }
+      };
+    };
+
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'state') {
+            setUiState(msg.state);
+            pushLog('info', `state → ${msg.state}`);
+          } else if (msg.type === 'transcript') {
+            const text =
+              msg.payload?.text ||
+              msg.payload?.transcript ||
+              msg.payload?.content ||
+              '';
+            if (text) pushLog('info', `asr: ${text}`);
+          } else if (msg.type === 'error') {
+            pushLog('warn', `provider error: ${msg.error?.message || 'unknown'}`);
+          } else {
+            pushLog('info', `msg: ${ev.data}`);
+          }
+        } catch {
+          pushLog('info', `msg: ${ev.data}`);
+        }
+        return;
+      }
+      // Binary = TTS PCM16 @16k mono. Convert → Float32 for player.
+      const pcm16 = new Int16Array(ev.data as ArrayBuffer);
+      const f32 = pcm16ToFloat32(pcm16);
+      playerNodeRef.current?.port.postMessage(f32.buffer, [f32.buffer]);
+    };
+
+    ws.onerror = (e: any) => {
+      pushLog('error', `WS error: ${e?.message || 'unknown'}`);
+    };
+
+    ws.onclose = () => {
+      pushLog('warn', 'WS closed');
+      setConnected(false);
+      setUiState('Disconnected');
+      stopVoice(); // ensure cleanup
+    };
+
+    wsRef.current = ws;
+  }
+
+  function stopVoice(){
+    try { wsRef.current?.send(JSON.stringify({ type:'stop' })); } catch {}
+    try { wsRef.current?.close(); } catch {}
+    wsRef.current = null;
+    if (encNodeRef.current) { try { encNodeRef.current.disconnect(); } catch {} encNodeRef.current = null; }
+    if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} micNodeRef.current = null; }
+    startedRef.current = false;
+    setConnected(false);
+    setUiState('Disconnected');
+  }
+
+  const start = () => { startVoice().catch((e)=>pushLog('error', String(e))); };
+  const stop  = () => { stopVoice(); };
+
   const readyLabel = (rs?: number) =>
-    rs === WebSocket.OPEN
-      ? 'OPEN'
-      : rs === WebSocket.CONNECTING
-      ? 'CONNECTING'
-      : rs === WebSocket.CLOSING
-      ? 'CLOSING'
-      : rs === WebSocket.CLOSED
-      ? 'CLOSED'
-      : '—';
+    rs === WebSocket.OPEN ? 'OPEN' :
+    rs === WebSocket.CONNECTING ? 'CONNECTING' :
+    rs === WebSocket.CLOSING ? 'CLOSING' :
+    rs === WebSocket.CLOSED ? 'CLOSED' : '—';
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
       <div className="mx-auto w-full max-w-[1150px] px-4 py-6">
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
-          {/* subtle background */}
           <div
             className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
-            style={{
-              background:
-                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
-            }}
+            style={{ background:
+              'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)' }}
           />
 
-          {/* status pill only (top-right), per your request the brand line is centered in hero below */}
           <div className="relative flex items-center justify-end px-7 pt-4">
             <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800/80'}`}>
-              {connected ? 'Connected' : 'Disconnected'}
+              {uiState}
             </span>
           </div>
 
-          {/* main grid */}
           <div className="relative grid grid-cols-1 gap-5 px-7 pb-5 pt-1 md:grid-cols-[1.35fr_0.9fr]">
-            {/* LEFT: branding */}
             <section className="flex flex-col items-center">
-              {/* centered brand line */}
-              <div className="mb-3 flex items-center justify-center gap-3">
-                {/* two blue “cc” circles */}
-                <svg
-                  width="36"
-                  height="20"
-                  viewBox="0 0 54 28"
-                  aria-hidden
-                  className="text-sky-400"
-                >
-                  <circle cx="14" cy="14" r="12" fill="none" stroke="currentColor" strokeWidth="3" />
-                  <circle cx="34" cy="14" r="12" fill="none" stroke="currentColor" strokeWidth="3" />
-                </svg>
-                <div className="text-sm md:text-base">
-                  <span className="font-semibold tracking-wide text-sky-400">CASE</span>{' '}
-                  <span className="font-semibold tracking-wide text-neutral-200">CONNECT</span>
+              <div className="mb-3 flex items-center justify-center gap-3 whitespace-nowrap">
+                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 font-semibold">C</div>
+                <div className="text-sm leading-tight md:text-base md:whitespace-nowrap">
+                  <span className="font-semibold tracking-wide">CASE CONNECT</span>
                 </div>
               </div>
 
-              <div className="w-full max-w-[860px] text-center">
-                {/* one line headline/subhead on desktop */}
-                <h1 className="mb-2 text-[34px] font-extrabold leading-tight text-amber-300 md:text-[40px] md:whitespace-nowrap">
+              <div className="w-full max-w-[980px] text-center">
+                <h1 className="mb-2 text-[30px] font-extrabold leading-tight text-amber-300 md:text-[36px] md:whitespace-nowrap">
                   Demo our AI intake experience
                 </h1>
-                <p className="mx-auto mb-4 max-w-none text-[16px] text-neutral-300 md:whitespace-nowrap">
+                <p className="mx-auto mb-4 max-w-none text-[15px] text-neutral-300 md:text-[16px] md:whitespace-nowrap">
                   Speak with our virtual assistant and experience a legal intake done right.
                 </p>
                 <button
@@ -160,7 +211,6 @@ export default function Page() {
                 </button>
               </div>
 
-              {/* voice tiles (short) */}
               <div className="w-full max-w-[860px]">
                 <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">
                   Choose a voice to sample
@@ -169,13 +219,13 @@ export default function Page() {
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
                       <button
-                        onClick={() => setVoiceId(v.id as '1' | '2' | '3')}
-                        className={`group relative aspect-[4/3] w-full max-h-[150px] overflow-hidden rounded-2xl border transition
-                          ${
-                            voiceId === v.id
-                              ? 'border-amber-400 shadow-[0_0_20px_rgba(255,200,0,0.15)]'
-                              : 'border-neutral-800 hover:border-neutral-700'
-                          }`}
+                        onClick={() => setVoiceId(v.id)}
+                        className={
+                          'group relative aspect-[4/3] w-full max-h-[150px] overflow-hidden rounded-2xl border transition ' +
+                          (voiceId === v.id
+                            ? 'border-amber-400 shadow-[0_0_20px_rgba(255,200,0,0.15)]'
+                            : 'border-neutral-800 hover:border-neutral-700')
+                        }
                         style={{ backgroundColor: '#000' }}
                         aria-label={v.name}
                       >
@@ -199,7 +249,6 @@ export default function Page() {
               </div>
             </section>
 
-            {/* RIGHT: messenger */}
             <section className="flex justify-center">
               <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
@@ -220,7 +269,7 @@ export default function Page() {
                           <span className="mr-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">
                             {l.t}
                           </span>
-                          <LevelPill level={l.level} />
+                          <LevelPill level={l.level as any} />
                           <span className="ml-2 break-words">{l.msg}</span>
                         </li>
                       ))}
@@ -229,13 +278,12 @@ export default function Page() {
                   <div ref={logEndRef} />
                 </div>
                 <footer className="border-t border-neutral-800 px-4 py-2 text-[11px] text-neutral-400">
-                  Echo/ping smoke only. Next: audio worklets → Deepgram.
+                  Live voice via Deepgram. States: {uiState}.
                 </footer>
               </div>
             </section>
           </div>
 
-          {/* bottom quick controls */}
           <div className="relative -mt-1 flex items-center justify-end gap-3 px-7 pb-5">
             <button
               onClick={start}
@@ -251,40 +299,14 @@ export default function Page() {
             </button>
           </div>
 
-          {/* advanced controls (kept for smoke tests) */}
+          {/* advanced (keep) */}
           <details className="mx-7 mb-5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
             <summary className="cursor-pointer text-sm text-neutral-300">Advanced smoke controls</summary>
-            <div className="mt-3 flex flex-wrap gap-3">
-              <button onClick={start} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium hover:bg-emerald-500">
-                Start smoke test
-              </button>
-              <button onClick={stop} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium hover:bg-rose-500">
-                Stop
-              </button>
-              <button onClick={connectEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                Connect echo
-              </button>
-              <button onClick={sendEcho} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                Send echo
-              </button>
-              <button onClick={connectPing} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                Connect ping
-              </button>
-              <button onClick={() => setLogs([])} className="rounded-lg bg-neutral-800 px-3 py-2 text-sm font-medium hover:bg-neutral-700">
-                Clear logs
-              </button>
-            </div>
             <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-neutral-300">
               <div className="rounded-lg border border-neutral-800 p-3">
-                <div className="text-neutral-400">/ws-echo</div>
+                <div className="text-neutral-400">/audio-stream</div>
                 <div className="mt-1 font-mono text-xs">
-                  state: <span className="font-semibold">{readyLabel(echoState)}</span>
-                </div>
-              </div>
-              <div className="rounded-lg border border-neutral-800 p-3">
-                <div className="text-neutral-400">/ws-ping</div>
-                <div className="mt-1 font-mono text-xs">
-                  state: <span className="font-semibold">{readyLabel(pingState)}</span>
+                  state: <span className="font-semibold">{connected ? 'OPEN' : 'CLOSED'}</span>
                 </div>
               </div>
               <a
@@ -303,12 +325,14 @@ export default function Page() {
   );
 }
 
-function LevelPill({ level }: { level: LogLevel }) {
-  const map: Record<LogLevel, string> = {
-    info: 'bg-sky-700',
-    ok: 'bg-emerald-700',
-    warn: 'bg-amber-700',
-    error: 'bg-rose-700',
-  };
-  return <span className={`rounded px-1.5 py-0.5 text-[10px] ${map[level]}`}>{level.toUpperCase()}</span>;
+function LevelPill({ level }: { level: 'info' | 'ok' | 'warn' | 'error' }) {
+  const color =
+    level === 'info'
+      ? 'bg-sky-700'
+      : level === 'ok'
+      ? 'bg-emerald-700'
+      : level === 'warn'
+      ? 'bg-amber-700'
+      : 'bg-rose-700';
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] ${color}`}>{level.toUpperCase()}</span>;
 }
