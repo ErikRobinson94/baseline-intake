@@ -1,4 +1,4 @@
-/* index.cjs – Next + Express + WS (manual upgrade routing) + Deepgram bridge */
+/* index.cjs – Next + Express + WS (manual upgrade routing) + Deepgram Agent bridge */
 process.env.TZ = 'UTC';
 
 const http = require('http');
@@ -14,7 +14,7 @@ const DEV = process.env.NODE_ENV !== 'production';
 const app = next({ dev: DEV, dir: process.cwd() });
 const handle = app.getRequestHandler();
 
-/* ---------- small JSON logger ---------- */
+/* ---------- tiny JSON logger ---------- */
 const LV = { error: 0, warn: 1, info: 2, debug: 3 };
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 function log(level, evt, meta) {
@@ -23,43 +23,66 @@ function log(level, evt, meta) {
   }
 }
 
-/* ---------- Deepgram voice bridge ---------- */
+/* ---------- Deepgram Agent bridge (client WS ⇄ Deepgram Agent WS) ---------- */
 function createVoiceBridge({ serverWS, req }) {
-  const dgUrl = process.env.DG_AGENT_URL || 'wss://agent.deepgram.com/v1/agent/converse';
   const apiKey = process.env.DG_API_KEY || process.env.DEEPGRAM_API_KEY;
   if (!apiKey) {
     log('error', 'DG.missing_api_key', {});
+    try { serverWS.send(JSON.stringify({ type: 'error', error: { message: 'Deepgram API key missing on server' } })); } catch {}
     try { serverWS.close(1011, 'missing DG_API_KEY'); } catch {}
     return;
   }
 
-  let closed = false;
-  let readyForAudio = false;
-
-  const dgWS = new WebSocket(dgUrl, {
-    headers: { Authorization: `Token ${apiKey}` },
-    perMessageDeflate: false,
-  });
-
   const sttModel = (process.env.DG_STT_MODEL || 'nova-2').trim();
   const ttsVoice = (process.env.DG_TTS_VOICE || 'aura-asteria-en').trim();
+  const llmModel = (process.env.LLM_MODEL   || 'gpt-4o-mini').trim();
+
+  const firm     = process.env.FIRM_NAME     || 'Your Firm';
+  const agent    = process.env.AGENT_NAME    || 'Your Specialist';
+  const greeting = process.env.AGENT_GREETING
+    || `Thank you for calling ${firm}. Were you in an accident, or are you an existing client?`;
+
+  const dgUrl = (process.env.DG_AGENT_URL || 'wss://agent.deepgram.com/v1/agent/converse').trim();
+
+  let closed = false;
+  let settingsSent = false;
+  let settingsApplied = false;
+  const preFrames = [];
+  const MAX_PRE_FRAMES = 200; // ~4s at 20ms
+
+  // *** IMPORTANT: use subprotocol "token" with key (matches your old, working code)
+  const dgWS = new WebSocket(dgUrl, ['token', apiKey], { perMessageDeflate: false });
+
+  dgWS.on('unexpectedResponse', (_req, res) => {
+    log('error', 'DG.unexpected_response', { statusCode: res.statusCode, headers: res.headers });
+  });
 
   function sendSettings() {
+    if (settingsSent) return;
+    const temperature = Number(process.env.LLM_TEMPERATURE || '0.15');
     const settings = {
       type: 'Settings',
       audio: {
         input:  { encoding: 'linear16', sample_rate: 16000 },
-        output: { encoding: 'linear16', sample_rate: 16000, container: 'none' },
+        output: { encoding: 'linear16', sample_rate: 16000 }, // container omitted: defaults OK for Agent
       },
       agent: {
         language: 'en',
+        greeting,
         listen: { provider: { type: 'deepgram', model: sttModel, smart_format: true } },
-        think:  { provider: { type: 'open_ai', model: 'gpt-4o-mini', temperature: 0.15 } },
+        think:  { provider: { type: 'open_ai', model: llmModel, temperature } },
         speak:  { provider: { type: 'deepgram', model: ttsVoice } },
       },
     };
-    try { dgWS.send(JSON.stringify(settings)); }
-    catch (e) { log('error', 'SERVER→DG.settings_error', { err: e.message }); }
+    try {
+      dgWS.send(JSON.stringify(settings));
+      settingsSent = true;
+      log('info', 'SERVER→DG.settings_sent', { sttModel, ttsVoice, llmModel, temperature });
+      try { serverWS.send(JSON.stringify({ type: 'state', state: 'Connected' })); } catch {}
+    } catch (e) {
+      log('error', 'SERVER→DG.settings_error', { err: e.message });
+      try { serverWS.send(JSON.stringify({ type: 'error', error: { message: 'Failed to send Settings to Deepgram' } })); } catch {}
+    }
   }
 
   dgWS.on('open', () => {
@@ -67,26 +90,53 @@ function createVoiceBridge({ serverWS, req }) {
     sendSettings();
   });
 
+  // KeepAlive to Agent
+  const keepalive = setInterval(() => {
+    if (dgWS.readyState === WebSocket.OPEN) {
+      try { dgWS.send(JSON.stringify({ type: 'KeepAlive' })); } catch {}
+    }
+  }, 25000);
+
   dgWS.on('message', (data) => {
     if (typeof data === 'string') {
       let evt; try { evt = JSON.parse(data); } catch {}
       if (evt) {
-        if (evt.type === 'Welcome') log('info', 'DG→SERVER.welcome', {});
-        else if (evt.type === 'SettingsApplied') {
-          readyForAudio = true;
-          log('info', 'DG→SERVER.settings_applied', {});
-          try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
-        } else if (evt.type === 'UserStartedSpeaking') {
-          try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
-        } else if (evt.type === 'AgentStartedSpeaking') {
-          try { serverWS.send(JSON.stringify({ type: 'state', state: 'Speaking' })); } catch {}
-        } else if (evt.type === 'Transcript' || evt.type === 'UserTranscript' || evt.type === 'ConversationText') {
-          try { serverWS.send(JSON.stringify({ type: 'transcript', payload: evt })); } catch {}
-        } else if (evt.type === 'Error' || evt.type === 'AgentError') {
-          log('warn', 'DG→SERVER.error', { evt });
-          try { serverWS.send(JSON.stringify({ type: 'error', error: evt })); } catch {}
-        } else {
-          log('debug', 'DG→SERVER.other', { t: evt.type });
+        switch (evt.type) {
+          case 'Welcome':
+            log('info', 'DG→SERVER.welcome'); sendSettings(); break;
+          case 'SettingsApplied':
+            settingsApplied = true;
+            log('info', 'DG→SERVER.settings_applied');
+            try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
+            // Flush preroll
+            if (preFrames.length) {
+              try { for (const fr of preFrames) dgWS.send(fr); } catch {}
+              preFrames.length = 0;
+            }
+            break;
+          case 'UserStartedSpeaking':
+            try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
+            break;
+          case 'AgentStartedSpeaking':
+            try { serverWS.send(JSON.stringify({ type: 'state', state: 'Speaking' })); } catch {}
+            break;
+          case 'AgentStoppedSpeaking':
+            try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
+            break;
+          case 'Transcript':
+          case 'UserTranscript':
+          case 'ConversationText':
+          case 'History':
+          case 'UserResponse':
+            try { serverWS.send(JSON.stringify({ type: 'transcript', payload: evt })); } catch {}
+            break;
+          case 'Error':
+          case 'AgentError':
+            log('warn', 'DG→SERVER.error', { evt });
+            try { serverWS.send(JSON.stringify({ type: 'error', error: evt })); } catch {}
+            break;
+          default:
+            log('debug', 'DG→SERVER.other', { type: evt.type });
         }
       }
       return;
@@ -103,6 +153,7 @@ function createVoiceBridge({ serverWS, req }) {
 
   dgWS.on('close', (code, reason) => {
     log('info', 'DG→SERVER.close', { code, reason: reason?.toString?.() || '' });
+    clearInterval(keepalive);
     safeClose();
   });
 
@@ -111,25 +162,30 @@ function createVoiceBridge({ serverWS, req }) {
     try { serverWS.send(JSON.stringify({ type: 'error', error: { message: e.message } })); } catch {}
   });
 
-  // Client → Server
+  // Client → Server WS (16k PCM16 audio frames or JSON)
   serverWS.on('message', (data, isBinary) => {
     if (!isBinary && typeof data === 'string') {
       try {
         const msg = JSON.parse(data);
         if (msg.type === 'start') {
           log('info', 'CLIENT→SERVER.start', {});
-          if (dgWS.readyState === WebSocket.OPEN && !readyForAudio) sendSettings();
+          if (dgWS.readyState === WebSocket.OPEN && !settingsSent) sendSettings();
         } else if (msg.type === 'stop') {
           log('info', 'CLIENT→SERVER.stop', {});
           safeClose();
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore non-JSON */ }
       return;
     }
-    if (dgWS.readyState === WebSocket.OPEN && readyForAudio) {
-      try { dgWS.send(data, { binary: true }); }
-      catch (e) { log('warn', 'SERVER→DG.audio_send_err', { err: e.message }); }
+    // Binary mic audio
+    if (dgWS.readyState !== WebSocket.OPEN) return;
+    if (!settingsApplied) {
+      preFrames.push(Buffer.isBuffer(data) ? data : Buffer.from(data));
+      if (preFrames.length > MAX_PRE_FRAMES) preFrames.shift();
+      return;
     }
+    try { dgWS.send(data, { binary: true }); }
+    catch (e) { log('warn', 'SERVER→DG.audio_send_err', { err: e.message }); }
   });
 
   serverWS.on('close', (code, reason) => { log('info', 'CLIENT→SERVER.close', { code, reason }); safeClose(); });
@@ -150,19 +206,19 @@ async function boot() {
   srv.set('trust proxy', 1);
   srv.use(morgan('tiny'));
 
-  // Health and a friendly HTTP handler for the WS path (helps logs)
+  // Health + hint for plain HTTP on WS path
   srv.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
   srv.get('/audio-stream', (_req, res) => res.status(426).send('Use WebSocket (wss) to /audio-stream'));
 
   const server = http.createServer(srv);
 
-  // Create WS servers with noServer; we'll route them manually on 'upgrade'
+  // WS servers (noServer; routed manually on 'upgrade')
   const wssEcho  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   const wssPing  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   const wssDemo  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   const wssAudio = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
-  // Echo
+  // /ws-echo
   wssEcho.on('connection', (ws, req) => {
     log('info', 'WS.echo.open', { ip: req.socket.remoteAddress });
     ws.on('message', (data) => {
@@ -171,25 +227,25 @@ async function boot() {
     });
   });
 
-  // Ping
+  // /ws-ping
   wssPing.on('connection', (ws) => {
     const iv = setInterval(() => { try { ws.send('pong'); } catch {} }, 1000);
     ws.on('close', () => clearInterval(iv));
   });
 
-  // Demo (text only)
+  // /web-demo/ws (simple hello)
   wssDemo.on('connection', (ws) => {
     try { ws.send(JSON.stringify({ hello: 'world' })); } catch {}
   });
 
-  // Audio (Deepgram bridge)
+  // /audio-stream (Deepgram bridge)
   wssAudio.on('connection', (ws, req) => {
     log('info', 'WS.audio.open', { ip: req.socket.remoteAddress });
     try { ws.send(JSON.stringify({ type: 'state', state: 'Connected' })); } catch {}
     createVoiceBridge({ serverWS: ws, req });
   });
 
-  // Manual upgrade router — most reliable behind proxies
+  // Manual upgrade router
   server.on('upgrade', (req, socket, head) => {
     const hdrUp = String(req.headers['upgrade'] || '').toLowerCase();
     if (hdrUp !== 'websocket') {
@@ -219,7 +275,7 @@ async function boot() {
     }
   });
 
-  // Next handler (Express 5-safe catch-all)
+  // Next.js handler
   srv.use((req, res) => handle(req, res));
 
   server.listen(PORT, () => {
