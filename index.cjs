@@ -1,4 +1,4 @@
-/* index.cjs – Next + Express + WS + Deepgram bridge (Express 5 safe) */
+/* index.cjs – Next + Express + WS (manual upgrade routing) + Deepgram bridge */
 process.env.TZ = 'UTC';
 
 const http = require('http');
@@ -19,14 +19,7 @@ const LV = { error: 0, warn: 1, info: 2, debug: 3 };
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 function log(level, evt, meta) {
   if ((LV[level] ?? 2) <= (LV[LOG_LEVEL] ?? 2)) {
-    console.log(
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        level,
-        evt,
-        ...(meta || {}),
-      })
-    );
+    console.log(JSON.stringify({ ts: new Date().toISOString(), level, evt, ...(meta || {}) }));
   }
 }
 
@@ -35,6 +28,7 @@ function createVoiceBridge({ serverWS, req }) {
   const dgUrl = process.env.DG_AGENT_URL || 'wss://agent.deepgram.com/v1/agent/converse';
   const apiKey = process.env.DG_API_KEY || process.env.DEEPGRAM_API_KEY;
   if (!apiKey) {
+    log('error', 'DG.missing_api_key', {});
     try { serverWS.close(1011, 'missing DG_API_KEY'); } catch {}
     return;
   }
@@ -42,7 +36,6 @@ function createVoiceBridge({ serverWS, req }) {
   let closed = false;
   let readyForAudio = false;
 
-  // Connect to Deepgram Converse
   const dgWS = new WebSocket(dgUrl, {
     headers: { Authorization: `Token ${apiKey}` },
     perMessageDeflate: false,
@@ -55,14 +48,14 @@ function createVoiceBridge({ serverWS, req }) {
     const settings = {
       type: 'Settings',
       audio: {
-        input: { encoding: 'linear16', sample_rate: 16000 },
+        input:  { encoding: 'linear16', sample_rate: 16000 },
         output: { encoding: 'linear16', sample_rate: 16000, container: 'none' },
       },
       agent: {
         language: 'en',
         listen: { provider: { type: 'deepgram', model: sttModel, smart_format: true } },
-        think: { provider: { type: 'open_ai', model: 'gpt-4o-mini', temperature: 0.15 } },
-        speak: { provider: { type: 'deepgram', model: ttsVoice } },
+        think:  { provider: { type: 'open_ai', model: 'gpt-4o-mini', temperature: 0.15 } },
+        speak:  { provider: { type: 'deepgram', model: ttsVoice } },
       },
     };
     try { dgWS.send(JSON.stringify(settings)); }
@@ -76,36 +69,30 @@ function createVoiceBridge({ serverWS, req }) {
 
   dgWS.on('message', (data) => {
     if (typeof data === 'string') {
-      let evt;
-      try { evt = JSON.parse(data); } catch {}
+      let evt; try { evt = JSON.parse(data); } catch {}
       if (evt) {
-        if (evt.type === 'Welcome') {
-          log('info', 'DG→SERVER.welcome', {});
-        } else if (evt.type === 'SettingsApplied') {
+        if (evt.type === 'Welcome') log('info', 'DG→SERVER.welcome', {});
+        else if (evt.type === 'SettingsApplied') {
           readyForAudio = true;
           log('info', 'DG→SERVER.settings_applied', {});
           try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
-        } else if (
-          evt.type === 'Transcript' ||
-          evt.type === 'UserTranscript' ||
-          evt.type === 'ConversationText'
-        ) {
-          try { serverWS.send(JSON.stringify({ type: 'transcript', payload: evt })); } catch {}
         } else if (evt.type === 'UserStartedSpeaking') {
           try { serverWS.send(JSON.stringify({ type: 'state', state: 'Listening' })); } catch {}
         } else if (evt.type === 'AgentStartedSpeaking') {
           try { serverWS.send(JSON.stringify({ type: 'state', state: 'Speaking' })); } catch {}
+        } else if (evt.type === 'Transcript' || evt.type === 'UserTranscript' || evt.type === 'ConversationText') {
+          try { serverWS.send(JSON.stringify({ type: 'transcript', payload: evt })); } catch {}
         } else if (evt.type === 'Error' || evt.type === 'AgentError') {
           log('warn', 'DG→SERVER.error', { evt });
           try { serverWS.send(JSON.stringify({ type: 'error', error: evt })); } catch {}
         } else {
-          log('debug', 'DG→SERVER.other', { evt: evt.type });
+          log('debug', 'DG→SERVER.other', { t: evt.type });
         }
       }
       return;
     }
 
-    // Binary → agent TTS audio (PCM16 @16k mono) → forward to client
+    // Binary TTS audio → client
     try {
       serverWS.send(data, { binary: true });
       log('debug', 'DG→SERVER.audio', { bytes: data.length });
@@ -124,7 +111,7 @@ function createVoiceBridge({ serverWS, req }) {
     try { serverWS.send(JSON.stringify({ type: 'error', error: { message: e.message } })); } catch {}
   });
 
-  // Client → Server WS handlers
+  // Client → Server
   serverWS.on('message', (data, isBinary) => {
     if (!isBinary && typeof data === 'string') {
       try {
@@ -139,14 +126,13 @@ function createVoiceBridge({ serverWS, req }) {
       } catch { /* ignore */ }
       return;
     }
-    // Binary mic audio (PCM16 16k mono 20ms frames)
     if (dgWS.readyState === WebSocket.OPEN && readyForAudio) {
       try { dgWS.send(data, { binary: true }); }
       catch (e) { log('warn', 'SERVER→DG.audio_send_err', { err: e.message }); }
     }
   });
 
-  serverWS.on('close', () => { log('info', 'CLIENT→SERVER.close', {}); safeClose(); });
+  serverWS.on('close', (code, reason) => { log('info', 'CLIENT→SERVER.close', { code, reason }); safeClose(); });
   serverWS.on('error', (e) => { log('warn', 'CLIENT→SERVER.ws_error', { err: e?.message || String(e) }); safeClose(); });
 
   function safeClose() {
@@ -161,17 +147,22 @@ function createVoiceBridge({ serverWS, req }) {
 async function boot() {
   await app.prepare();
   const srv = express();
+  srv.set('trust proxy', 1);
   srv.use(morgan('tiny'));
 
-  // simple health check
-  srv.get('/healthz', (_req, res) => {
-    res.json({ ok: true, ts: new Date().toISOString() });
-  });
+  // Health and a friendly HTTP handler for the WS path (helps logs)
+  srv.get('/healthz', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+  srv.get('/audio-stream', (_req, res) => res.status(426).send('Use WebSocket (wss) to /audio-stream'));
 
   const server = http.createServer(srv);
 
-  // --- WS: echo
-  const wssEcho = new WebSocketServer({ server, path: '/ws-echo', perMessageDeflate: false });
+  // Create WS servers with noServer; we'll route them manually on 'upgrade'
+  const wssEcho  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  const wssPing  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  const wssDemo  = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  const wssAudio = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+
+  // Echo
   wssEcho.on('connection', (ws, req) => {
     log('info', 'WS.echo.open', { ip: req.socket.remoteAddress });
     ws.on('message', (data) => {
@@ -180,28 +171,55 @@ async function boot() {
     });
   });
 
-  // --- WS: ping
-  const wssPing = new WebSocketServer({ server, path: '/ws-ping', perMessageDeflate: false });
+  // Ping
   wssPing.on('connection', (ws) => {
     const iv = setInterval(() => { try { ws.send('pong'); } catch {} }, 1000);
     ws.on('close', () => clearInterval(iv));
   });
 
-  // --- WS: demo (text only)
-  const wssDemo = new WebSocketServer({ server, path: '/web-demo/ws', perMessageDeflate: false });
+  // Demo (text only)
   wssDemo.on('connection', (ws) => {
     try { ws.send(JSON.stringify({ hello: 'world' })); } catch {}
   });
 
-  // --- WS: audio-stream (voice)
-  const wssAudio = new WebSocketServer({ server, path: '/audio-stream', perMessageDeflate: false });
+  // Audio (Deepgram bridge)
   wssAudio.on('connection', (ws, req) => {
     log('info', 'WS.audio.open', { ip: req.socket.remoteAddress });
     try { ws.send(JSON.stringify({ type: 'state', state: 'Connected' })); } catch {}
     createVoiceBridge({ serverWS: ws, req });
   });
 
-  // ---------- Next handler (Express 5-safe catch-all) ----------
+  // Manual upgrade router — most reliable behind proxies
+  server.on('upgrade', (req, socket, head) => {
+    const hdrUp = String(req.headers['upgrade'] || '').toLowerCase();
+    if (hdrUp !== 'websocket') {
+      socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    let pathname = '/';
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      pathname = url.pathname;
+    } catch {}
+
+    log('info', 'WS.upgrade', { path: pathname, ua: req.headers['user-agent'] });
+
+    if (pathname === '/ws-echo') {
+      wssEcho.handleUpgrade(req, socket, head, (ws) => wssEcho.emit('connection', ws, req));
+    } else if (pathname === '/ws-ping') {
+      wssPing.handleUpgrade(req, socket, head, (ws) => wssPing.emit('connection', ws, req));
+    } else if (pathname === '/web-demo/ws') {
+      wssDemo.handleUpgrade(req, socket, head, (ws) => wssDemo.emit('connection', ws, req));
+    } else if (pathname === '/audio-stream') {
+      wssAudio.handleUpgrade(req, socket, head, (ws) => wssAudio.emit('connection', ws, req));
+    } else {
+      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+    }
+  });
+
+  // Next handler (Express 5-safe catch-all)
   srv.use((req, res) => handle(req, res));
 
   server.listen(PORT, () => {
