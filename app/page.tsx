@@ -18,17 +18,17 @@ const FALLBACK_DATA_URI =
   );
 
 type Level = 'info' | 'ok' | 'warn' | 'error';
-function nowStr(){ return new Date().toLocaleTimeString(); }
+function nowStr() { return new Date().toLocaleTimeString(); }
 
 export default function Page() {
   const [voiceId, setVoiceId] = useState('2');
   const [connected, setConnected] = useState(false);
   const [uiState, setUiState] = useState<'Disconnected' | 'Connected' | 'Listening' | 'Speaking'>('Disconnected');
 
-  const [logs, setLogs] = useState<{t:string, level:Level, msg:string}[]>([]);
-  const pushLog = (level:Level, msg:string) => setLogs((p)=>[...p,{t:nowStr(), level, msg}]);
-  const logEndRef = useRef<HTMLDivElement|null>(null);
-  useEffect(()=>{ logEndRef.current?.scrollIntoView({behavior:'smooth'}); }, [logs]);
+  const [logs, setLogs] = useState<{ t: string, level: Level, msg: string }[]>([]);
+  const pushLog = (level: Level, msg: string) => setLogs((p) => [...p, { t: nowStr(), level, msg }]);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -37,38 +37,47 @@ export default function Page() {
   }, []);
 
   // audio graph refs
-  const audioRef = useRef<AudioContext|null>(null);
-  const micNodeRef = useRef<MediaStreamAudioSourceNode|null>(null);
-  const encNodeRef = useRef<AudioWorkletNode|null>(null);
-  const playerNodeRef = useRef<AudioWorkletNode|null>(null);
-  const wsRef = useRef<WebSocket|null>(null);
+  const audioRef = useRef<AudioContext | null>(null);
+  const micNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const encNodeRef = useRef<AudioWorkletNode | null>(null);
+  const playerNodeRef = useRef<AudioWorkletNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const startedRef = useRef(false);
 
-  async function ensureAudioGraph(){
-    if (audioRef.current) return;
-    const ac = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 48000 });
-    await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
-    pushLog('ok', 'worklet loaded: pcm-processor');
-    await ac.audioWorklet.addModule('/worklets/pcm-player.js');
-    pushLog('ok', 'worklet loaded: pcm-player');
-    const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
-    player.connect(ac.destination);
-    audioRef.current = ac;
-    playerNodeRef.current = player;
-    pushLog('ok', 'worklet nodes created');
+  async function ensureAudioGraph() {
+    if (!audioRef.current) {
+      const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const ac: AudioContext = new AC({ sampleRate: 48000 });
+
+      // Safari/iOS can require a resume before worklet add; ignore errors.
+      try { if (ac.state === 'suspended') await ac.resume(); } catch {}
+
+      await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
+      pushLog('ok', 'worklet loaded: pcm-processor');
+      await ac.audioWorklet.addModule('/worklets/pcm-player.js');
+      pushLog('ok', 'worklet loaded: pcm-player');
+
+      const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
+      player.connect(ac.destination);
+
+      audioRef.current = ac;
+      playerNodeRef.current = player;
+      pushLog('ok', 'worklet nodes created');
+    }
   }
 
   // --- Resample PCM16@16k → Float32@ctxRate (linear) ---
   function resamplePcm16ToF32(pcm16: Int16Array, inRate: number, outRate: number): Float32Array {
     if (inRate === outRate) {
       const out = new Float32Array(pcm16.length);
-      for (let i=0;i<pcm16.length;i++) out[i] = (pcm16[i] < 0 ? pcm16[i] / 0x8000 : pcm16[i] / 0x7FFF);
+      for (let i = 0; i < pcm16.length; i++) out[i] = (pcm16[i] < 0 ? pcm16[i] / 0x8000 : pcm16[i] / 0x7FFF);
       return out;
     }
     const outLen = Math.round(pcm16.length * outRate / inRate);
     const out = new Float32Array(outLen);
     const ratio = inRate / outRate; // input samples per output sample
-    for (let i=0;i<outLen;i++){
+    for (let i = 0; i < outLen; i++) {
       const pos = i * ratio;
       const idx = Math.floor(pos);
       const frac = pos - idx;
@@ -81,7 +90,7 @@ export default function Page() {
     return out;
   }
 
-  async function startVoice(){
+  async function startVoice() {
     if (startedRef.current) return;
     startedRef.current = true;
 
@@ -96,16 +105,17 @@ export default function Page() {
         audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true },
         video: false
       });
+      micStreamRef.current = stream;
       pushLog('ok', 'mic granted');
-    } catch (e:any) {
-      pushLog('error', `No mic: ${e?.message||e}`);
+    } catch (e: any) {
+      pushLog('error', `No mic: ${e?.message || e}`);
       startedRef.current = false;
       return;
     }
 
     // build mic → encoder (20ms frames @16k)
     const mic = ac.createMediaStreamSource(stream);
-    const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs:1, numberOfOutputs:0 });
+    const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
     mic.connect(enc);
     micNodeRef.current = mic;
     encNodeRef.current = enc;
@@ -119,7 +129,7 @@ export default function Page() {
       setConnected(true);
       setUiState('Connected');
       pushLog('ok', `WS open ${url}`);
-      ws.send(JSON.stringify({ type:'start', voiceId }));
+      ws.send(JSON.stringify({ type: 'start', voiceId }));
 
       // pump mic frames to server as binary PCM16@16k
       enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
@@ -154,10 +164,15 @@ export default function Page() {
         return;
       }
       // Binary = TTS PCM16 @16k → **resample** to ctx rate → player
-      const pcm16 = new Int16Array(ev.data as ArrayBuffer);
-      const outRate = audioRef.current?.sampleRate || 48000;
-      const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
-      playerNodeRef.current?.port.postMessage(f32.buffer, [f32.buffer]);
+      try {
+        const pcm16 = new Int16Array(ev.data as ArrayBuffer);
+        const outRate = audioRef.current?.sampleRate || 48000;
+        const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
+        const player = playerNodeRef.current;
+        if (player) player.port.postMessage(f32.buffer, [f32.buffer]);
+      } catch (e: any) {
+        pushLog('warn', `audio chunk err: ${e?.message || String(e)}`);
+      }
     };
 
     ws.onerror = (e: any) => {
@@ -174,19 +189,28 @@ export default function Page() {
     wsRef.current = ws;
   }
 
-  function stopVoice(){
-    try { wsRef.current?.send(JSON.stringify({ type:'stop' })); } catch {}
+  function stopVoice() {
+    try { wsRef.current?.send(JSON.stringify({ type: 'stop' })); } catch {}
     try { wsRef.current?.close(); } catch {}
     wsRef.current = null;
+
     if (encNodeRef.current) { try { encNodeRef.current.disconnect(); } catch {} encNodeRef.current = null; }
     if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} micNodeRef.current = null; }
+
+    // stop mic tracks so the browser releases the device
+    const s = micStreamRef.current;
+    if (s) {
+      try { s.getTracks().forEach(t => t.stop()); } catch {}
+      micStreamRef.current = null;
+    }
+
     startedRef.current = false;
     setConnected(false);
     setUiState('Disconnected');
   }
 
-  const start = () => { startVoice().catch((e)=>pushLog('error', String(e))); };
-  const stop  = () => { stopVoice(); };
+  const start = () => { startVoice().catch((e) => pushLog('error', String(e))); };
+  const stop = () => { stopVoice(); };
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
@@ -194,8 +218,10 @@ export default function Page() {
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
           <div
             className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
-            style={{ background:
-              'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0,0.08), transparent 60%)' }}
+            style={{
+              background:
+                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)'
+            }}
           />
 
           <div className="relative flex items-center justify-end px-7 pt-4">
@@ -269,7 +295,7 @@ export default function Page() {
 
             {/* RIGHT: logs */}
             <section className="flex justify-center">
-              <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h=[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
