@@ -29,7 +29,7 @@ function jlog(level, evt, meta = {}) {
 
     const server = createServer(ex);
 
-    // Attach the browser live demo bridge to BOTH routes
+    // Attach browser live-demo bridge on explicit routes
     try {
       const { setupWebDemoLive } = require('./lib/web-demo-live.cjs');
       setupWebDemoLive(server, { route: '/audio-stream' });
@@ -38,14 +38,13 @@ function jlog(level, evt, meta = {}) {
       jlog('warn', 'web_demo_live_not_loaded', { err: e?.message || String(e) });
     }
 
-    // Smoke-test WS: /ws-echo and /ws-ping
+    // Smoke-test WS endpoints
     const echoWSS = new WebSocket.Server({ noServer: true });
     echoWSS.on('connection', (ws) => ws.on('message', (msg) => ws.send(msg)));
 
     const pingWSS = new WebSocket.Server({ noServer: true });
     pingWSS.on('connection', (ws) => { try { ws.send('pong'); } catch {} });
 
-    // Only take over the two explicit smoke routes; leave others to path-bound WSS
     server.on('upgrade', (req, socket, head) => {
       if (req.url === '/ws-echo') {
         echoWSS.handleUpgrade(req, socket, head, (ws) => echoWSS.emit('connection', ws, req));
@@ -55,12 +54,11 @@ function jlog(level, evt, meta = {}) {
         pingWSS.handleUpgrade(req, socket, head, (ws) => pingWSS.emit('connection', ws, req));
         return;
       }
-      // NOTE: web-demo-live creates WSS with { server, path }, so it will
-      // accept upgrades for /audio-stream and /web-demo/ws directly.
+      // Note: web-demo-live attaches path-bound WSS and will handle /audio-stream and /web-demo/ws.
     });
 
-    // ✅ Express 5–safe catch-all (NO regex parens). Avoid '*'!
-    ex.all('/:path(*)', (req, res) => handle(req, res));
+    // ✅ Express 5 safe catch-all: no path string (avoids path-to-regexp)
+    ex.use((req, res) => handle(req, res));
 
     const port = Number(process.env.PORT || 10000);
     server.listen(port, () => jlog('info', 'server_listen', { port, dev }));
@@ -69,4 +67,3 @@ function jlog(level, evt, meta = {}) {
     process.exit(1);
   }
 })();
-
