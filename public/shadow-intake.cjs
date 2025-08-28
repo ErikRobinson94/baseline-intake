@@ -1,38 +1,48 @@
 // lib/shadow-intake.cjs
-function sanitizeASCII(str) {
-  if (!str) return '';
-  return String(str).replace(/[\u0000-\u001F\u007F-\uFFFF]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-function compact(s, max = 380) {
-  if (!s) return '';
-  const t = s.length <= max ? s : s.slice(0, max);
-  if (t.length >= 40) return t;
-  return 'You are the intake specialist. Determine existing client vs accident. If existing: ask full name, best phone, and attorney; then say you will transfer. If accident: collect full name, phone, email, what happened, when, and city/state; confirm all; then say you will transfer. Be warm, concise, and stop speaking if the caller talks.';
-}
+// Lightweight "shadow intake" extractor: accumulates transcripts and
+// infers client_type, full_name, phone, email, incident, date, location.
 
 function makeIntakeState() {
   return {
-    client_type: null, full_name: null, phone: null, email: null,
-    incident: null, date: null, location: null,
-    transcripts: [], _recentUtterances: [], completeLogged: false,
+    client_type: null,
+    full_name:   null,
+    phone:       null,
+    email:       null,
+    incident:    null,
+    date:        null,
+    location:    null,
+    transcripts: [],
+    _recentUtterances: [],
   };
 }
+
 const toTitle = s => (s||'').replace(/\b([a-z])/gi, m => m.toUpperCase());
+
 const extractPhone = t => {
   const s = (t||'').replace(/[^\d\+]/g, '');
   const m = s.match(/(?:\+1)?(\d{10})$/);
-  return m ? m[0].replace(/(\d{1,2})(\d{3})(\d{3})(\d{4})/, (x,c,a,b,d)=> (x.length===10?`${a}-${b}-${d}`:`+${c} ${a}-${b}-${d}`)) : null;
+  if (!m) return null;
+  const raw = m[0];
+  const digits = raw.replace(/[^\d]/g,'');
+  if (digits.length === 10) {
+    return digits.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3');
+  }
+  // +1XXXXXXXXXX
+  return `+${digits[0]} ${digits.slice(1).replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3')}`;
 };
+
 const extractEmail = t => {
   const m = (t||'').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return m ? m[0] : null;
 };
+
 const extractClientType = t => {
   const s = (t||'').toLowerCase();
   if (/\b(existing|current|already.*client)\b/.test(s)) return 'existing';
   if (/\b(new|potential|not.*client|accident|injury|case)\b/.test(s)) return 'new';
   return null;
 };
+
 const extractFullName = t => {
   if (!t) return null;
   let m = t.match(/\b(?:my name is|this is|i am|i'm)\s+([a-z][a-z\s\.'-]{2,})$/i);
@@ -43,6 +53,7 @@ const extractFullName = t => {
   m = t.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b/);
   return m ? m[1] : null;
 };
+
 const extractDate = t => {
   if (!t) return null;
   const m =
@@ -51,6 +62,7 @@ const extractDate = t => {
     t.match(/\b(?:yesterday|today|last\s+(?:mon|tue|wed|thu|fri|sat|sun)(?:day)?)\b/i);
   return m ? m[0] : null;
 };
+
 const extractLocation = t => {
   if (!t) return null;
   let m = t.match(/\b(?:in|at)\s+([A-Za-z][A-Za-z\.\-']+(?:\s+[A-Za-z\.\-']+)*)(?:,\s*([A-Za-z]{2,}))?\b/);
@@ -61,26 +73,34 @@ const extractLocation = t => {
   const st   = m[2] ? m[2].toUpperCase() : '';
   return st ? `${city}, ${st}` : city;
 };
-const looksIncidenty = t => /\b(accident|injury|fell|fall|collision|crash|rear[- ]?ended|hit|dog bite|bite|slip|trip|work|car|uber|lyft|truck|bicycle|pedestrian|bus|motorcycle)\b/i.test(t||'');
+
+const looksIncidenty = t =>
+  /\b(accident|injury|fell|fall|collision|crash|rear[- ]?ended|hit|dog bite|bite|slip|trip|work|car|uber|lyft|truck|bicycle|pedestrian|bus|motorcycle)\b/i
+    .test(t||'');
+
 function isComplete(intake) {
   return !!(intake.client_type && intake.full_name && (intake.phone || intake.email) && intake.incident && intake.date && intake.location);
 }
+
 function intakeSnapshot(intake) {
   const { client_type, full_name, phone, email, incident, date, location } = intake;
   return { client_type, full_name, phone, email, incident, date, location, complete: isComplete(intake) };
 }
-function updateIntakeFromUserText(intake, text, logger = () => {}) {
+
+function updateIntakeFromUserText(intake, text, onChange) {
   const incoming = (text || '').trim();
   if (!incoming) return;
+
   const recent = intake._recentUtterances || (intake._recentUtterances = []);
   if (recent.includes(incoming)) return;
   recent.push(incoming);
   if (recent.length > 25) recent.shift();
+
   intake.transcripts.push(incoming);
 
   let changed = false;
   const maybe = (label, val) => {
-    if (val && !intake[label]) { intake[label] = val; changed = true; logger('info','intake_field',{ field: label, value: intake[label] }); }
+    if (val && !intake[label]) { intake[label] = val; changed = true; }
   };
   maybe('client_type', extractClientType(incoming));
   maybe('full_name',   extractFullName(incoming));
@@ -91,13 +111,15 @@ function updateIntakeFromUserText(intake, text, logger = () => {}) {
   if (!intake.incident) {
     const words = incoming.split(/\s+/);
     if (looksIncidenty(incoming) || words.length >= 6) {
-      intake.incident = incoming; changed = true; logger('info','intake_field',{ field: 'incident', value: intake.incident });
+      intake.incident = incoming; changed = true;
     }
   }
-  if (changed) logger('info','intake_snapshot', intakeSnapshot(intake));
+  if (changed && typeof onChange === 'function') onChange(intakeSnapshot(intake));
 }
 
 module.exports = {
-  sanitizeASCII, compact,
-  makeIntakeState, updateIntakeFromUserText, intakeSnapshot, isComplete,
+  makeIntakeState,
+  updateIntakeFromUserText,
+  intakeSnapshot,
+  isComplete,
 };
