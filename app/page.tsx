@@ -18,17 +18,20 @@ const FALLBACK_DATA_URI =
   );
 
 type Level = 'info' | 'ok' | 'warn' | 'error';
-function nowStr() { return new Date().toLocaleTimeString(); }
+const nowStr = () => new Date().toLocaleTimeString();
 
 export default function Page() {
   const [voiceId, setVoiceId] = useState('2');
   const [connected, setConnected] = useState(false);
   const [uiState, setUiState] = useState<'Disconnected' | 'Connected' | 'Listening' | 'Speaking'>('Disconnected');
 
-  const [logs, setLogs] = useState<{ t: string, level: Level, msg: string }[]>([]);
+  const [logs, setLogs] = useState<{ t: string; level: Level; msg: string }[]>([]);
   const pushLog = (level: Level, msg: string) => setLogs((p) => [...p, { t: nowStr(), level, msg }]);
+
   const logEndRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -41,50 +44,71 @@ export default function Page() {
   const micNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const encNodeRef = useRef<AudioWorkletNode | null>(null);
   const playerNodeRef = useRef<AudioWorkletNode | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
   const startedRef = useRef(false);
 
-  async function ensureAudioGraph() {
-    if (!audioRef.current) {
-      const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ac: AudioContext = new AC({ sampleRate: 48000 });
+  // client-side frame buffer so we never “miss” mic audio before WS opens
+  const pendingFramesRef = useRef<ArrayBuffer[]>([]);
+  const micBytesThisSecRef = useRef(0);
+  const sentBytesThisSecRef = useRef(0);
+  const meterTimerRef = useRef<number | null>(null);
 
-      // Safari/iOS can require a resume before worklet add; ignore errors.
-      try { if (ac.state === 'suspended') await ac.resume(); } catch {}
-
-      await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
-      pushLog('ok', 'worklet loaded: pcm-processor');
-      await ac.audioWorklet.addModule('/worklets/pcm-player.js');
-      pushLog('ok', 'worklet loaded: pcm-player');
-
-      const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
-      player.connect(ac.destination);
-
-      audioRef.current = ac;
-      playerNodeRef.current = player;
-      pushLog('ok', 'worklet nodes created');
+  function startMeter() {
+    stopMeter();
+    meterTimerRef.current = window.setInterval(() => {
+      const micB = micBytesThisSecRef.current;
+      const netB = sentBytesThisSecRef.current;
+      micBytesThisSecRef.current = 0;
+      sentBytesThisSecRef.current = 0;
+      pushLog('info', `meter: mic=${micB} B/s → ws=${netB} B/s`);
+    }, 1000);
+  }
+  function stopMeter() {
+    if (meterTimerRef.current != null) {
+      clearInterval(meterTimerRef.current);
+      meterTimerRef.current = null;
     }
+  }
+
+  async function ensureAudioGraph() {
+    if (audioRef.current) return;
+    const AC: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
+    const ac = new AC({ sampleRate: 48000 });
+
+    await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
+    pushLog('ok', 'worklet loaded: pcm-processor');
+    await ac.audioWorklet.addModule('/worklets/pcm-player.js');
+    pushLog('ok', 'worklet loaded: pcm-player');
+
+    const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
+    player.connect(ac.destination);
+
+    audioRef.current = ac;
+    playerNodeRef.current = player;
+    pushLog('ok', 'worklet nodes created');
+
+    ac.onstatechange = () => pushLog('info', `AudioContext state → ${ac.state}`);
   }
 
   // --- Resample PCM16@16k → Float32@ctxRate (linear) ---
   function resamplePcm16ToF32(pcm16: Int16Array, inRate: number, outRate: number): Float32Array {
     if (inRate === outRate) {
       const out = new Float32Array(pcm16.length);
-      for (let i = 0; i < pcm16.length; i++) out[i] = (pcm16[i] < 0 ? pcm16[i] / 0x8000 : pcm16[i] / 0x7FFF);
+      for (let i = 0; i < pcm16.length; i++) out[i] = pcm16[i] < 0 ? pcm16[i] / 0x8000 : pcm16[i] / 0x7fff;
       return out;
     }
-    const outLen = Math.round(pcm16.length * outRate / inRate);
+    const outLen = Math.round((pcm16.length * outRate) / inRate);
     const out = new Float32Array(outLen);
-    const ratio = inRate / outRate; // input samples per output sample
+    const ratio = inRate / outRate;
     for (let i = 0; i < outLen; i++) {
       const pos = i * ratio;
       const idx = Math.floor(pos);
       const frac = pos - idx;
       const s0 = pcm16[idx] ?? pcm16[pcm16.length - 1] ?? 0;
       const s1 = pcm16[idx + 1] ?? s0;
-      const v0 = s0 < 0 ? s0 / 0x8000 : s0 / 0x7FFF;
-      const v1 = s1 < 0 ? s1 / 0x8000 : s1 / 0x7FFF;
+      const v0 = s0 < 0 ? s0 / 0x8000 : s0 / 0x7fff;
+      const v1 = s1 < 0 ? s1 / 0x8000 : s1 / 0x7fff;
       out[i] = v0 + (v1 - v0) * frac;
     }
     return out;
@@ -97,15 +121,15 @@ export default function Page() {
     await ensureAudioGraph();
     const ac = audioRef.current!;
     if (ac.state === 'suspended') await ac.resume();
+    pushLog('info', `AudioContext ready @ ${ac.sampleRate} Hz`);
 
-    // get mic
+    // mic
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true },
-        video: false
+        video: false,
       });
-      micStreamRef.current = stream;
       pushLog('ok', 'mic granted');
     } catch (e: any) {
       pushLog('error', `No mic: ${e?.message || e}`);
@@ -113,14 +137,39 @@ export default function Page() {
       return;
     }
 
-    // build mic → encoder (20ms frames @16k)
+    // mic → encoder (16k / 20ms)
     const mic = ac.createMediaStreamSource(stream);
     const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
+
+    // hook encoder OUTPUT **before** we open WS; buffer frames
+    enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+      const buf = ev.data;
+      micBytesThisSecRef.current += (buf?.byteLength || 0);
+      // If socket is open, flush any backlog + this frame
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // flush backlog first
+        if (pendingFramesRef.current.length) {
+          let flushed = 0, bytes = 0;
+          for (const f of pendingFramesRef.current) {
+            try { ws.send(f); sentBytesThisSecRef.current += f.byteLength; flushed++; bytes += f.byteLength; } catch {}
+          }
+          pendingFramesRef.current.length = 0;
+          pushLog('info', `flushed pending frames → ${flushed} (${bytes} B)`);
+        }
+        try { ws.send(buf); sentBytesThisSecRef.current += buf.byteLength; } catch {}
+      } else {
+        // keep up to ~5s of 20ms frames = 250 frames
+        if (pendingFramesRef.current.length >= 250) pendingFramesRef.current.shift();
+        pendingFramesRef.current.push(buf);
+      }
+    };
+
     mic.connect(enc);
     micNodeRef.current = mic;
     encNodeRef.current = enc;
 
-    // open WS to /audio-stream
+    // WS to server
     const url = `${wsBase}/audio-stream`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
@@ -129,14 +178,20 @@ export default function Page() {
       setConnected(true);
       setUiState('Connected');
       pushLog('ok', `WS open ${url}`);
-      ws.send(JSON.stringify({ type: 'start', voiceId }));
+      startMeter();
 
-      // pump mic frames to server as binary PCM16@16k
-      enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try { ws.send(ev.data); } catch {}
+      // tell server voice selection (server ignores if not needed)
+      try { ws.send(JSON.stringify({ type: 'start', voiceId })); } catch {}
+
+      // flush whatever frames we buffered locally while opening
+      if (pendingFramesRef.current.length) {
+        let flushed = 0, bytes = 0;
+        for (const f of pendingFramesRef.current) {
+          try { ws.send(f); sentBytesThisSecRef.current += f.byteLength; flushed++; bytes += f.byteLength; } catch {}
         }
-      };
+        pendingFramesRef.current.length = 0;
+        pushLog('info', `initial flush → ${flushed} frames (${bytes} B)`);
+      }
     };
 
     ws.onmessage = (ev) => {
@@ -148,13 +203,12 @@ export default function Page() {
             pushLog('info', `state → ${msg.state}`);
           } else if (msg.type === 'transcript') {
             const text =
-              msg.payload?.text ||
-              msg.payload?.transcript ||
-              msg.payload?.content ||
-              '';
+              msg.text ?? msg.payload?.text ?? msg.payload?.transcript ?? msg.payload?.content ?? '';
             if (text) pushLog('info', `asr: ${text}`);
+          } else if (msg.type === 'status') {
+            pushLog('info', `status: ${msg.text || JSON.stringify(msg)}`);
           } else if (msg.type === 'error') {
-            pushLog('warn', `provider error: ${msg.error?.message || 'unknown'}`);
+            pushLog('error', `upstream: ${msg.error?.message || 'unknown'}`);
           } else {
             pushLog('info', `msg: ${ev.data}`);
           }
@@ -163,16 +217,12 @@ export default function Page() {
         }
         return;
       }
-      // Binary = TTS PCM16 @16k → **resample** to ctx rate → player
-      try {
-        const pcm16 = new Int16Array(ev.data as ArrayBuffer);
-        const outRate = audioRef.current?.sampleRate || 48000;
-        const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
-        const player = playerNodeRef.current;
-        if (player) player.port.postMessage(f32.buffer, [f32.buffer]);
-      } catch (e: any) {
-        pushLog('warn', `audio chunk err: ${e?.message || String(e)}`);
-      }
+
+      // Binary = TTS PCM16@16k → resample to ctx rate → player
+      const pcm16 = new Int16Array(ev.data as ArrayBuffer);
+      const outRate = audioRef.current?.sampleRate || 48000;
+      const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
+      playerNodeRef.current?.port.postMessage(f32.buffer, [f32.buffer]);
     };
 
     ws.onerror = (e: any) => {
@@ -183,6 +233,7 @@ export default function Page() {
       pushLog('warn', `WS closed (code=${ev.code}, reason="${ev.reason}")`);
       setConnected(false);
       setUiState('Disconnected');
+      stopMeter();
       stopVoice(); // ensure cleanup
     };
 
@@ -197,12 +248,8 @@ export default function Page() {
     if (encNodeRef.current) { try { encNodeRef.current.disconnect(); } catch {} encNodeRef.current = null; }
     if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} micNodeRef.current = null; }
 
-    // stop mic tracks so the browser releases the device
-    const s = micStreamRef.current;
-    if (s) {
-      try { s.getTracks().forEach(t => t.stop()); } catch {}
-      micStreamRef.current = null;
-    }
+    pendingFramesRef.current.length = 0;
+    stopMeter();
 
     startedRef.current = false;
     setConnected(false);
@@ -220,7 +267,7 @@ export default function Page() {
             className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
             style={{
               background:
-                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)'
+                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
             }}
           />
 
@@ -256,9 +303,7 @@ export default function Page() {
               </div>
 
               <div className="w-full max-w-[860px]">
-                <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">
-                  Choose a voice to sample
-                </h3>
+                <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">Choose a voice to sample</h3>
                 <div className="grid grid-cols-3 gap-4">
                   {VOICES.map((v) => (
                     <div key={v.id} className="flex flex-col items-center">
@@ -295,7 +340,7 @@ export default function Page() {
 
             {/* RIGHT: logs */}
             <section className="flex justify-center">
-              <div className="flex h-[440px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
+              <div className="flex h-[520px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
@@ -336,10 +381,7 @@ export default function Page() {
             >
               Start
             </button>
-            <button
-              onClick={stop}
-              className="rounded-xl bg-neutral-800 px-5 py-2 font-semibold hover:bg-neutral-700"
-            >
+            <button onClick={stop} className="rounded-xl bg-neutral-800 px-5 py-2 font-semibold hover:bg-neutral-700">
               Stop
             </button>
           </div>
@@ -371,12 +413,6 @@ export default function Page() {
 
 function LevelPill({ level }: { level: 'info' | 'ok' | 'warn' | 'error' }) {
   const color =
-    level === 'info'
-      ? 'bg-sky-700'
-      : level === 'ok'
-      ? 'bg-emerald-700'
-      : level === 'warn'
-      ? 'bg-amber-700'
-      : 'bg-rose-700';
+    level === 'info' ? 'bg-sky-700' : level === 'ok' ? 'bg-emerald-700' : level === 'warn' ? 'bg-amber-700' : 'bg-rose-700';
   return <span className={`rounded px-1.5 py-0.5 text-[10px] ${color}`}>{level.toUpperCase()}</span>;
 }
