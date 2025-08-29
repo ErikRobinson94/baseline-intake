@@ -2,6 +2,8 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
+type ChatItem = { who: 'User' | 'Agent'; text: string };
+
 const VOICES = [
   { id: '1', name: 'Voice 1', src: '/voices/voice1.png' },
   { id: '2', name: 'Voice 2', src: '/voices/voice2.png' },
@@ -17,21 +19,15 @@ const FALLBACK_DATA_URI =
     </svg>`
   );
 
-type Level = 'info' | 'ok' | 'warn' | 'error';
-const nowStr = () => new Date().toLocaleTimeString();
-
 export default function Page() {
   const [voiceId, setVoiceId] = useState('2');
   const [connected, setConnected] = useState(false);
   const [uiState, setUiState] = useState<'Disconnected' | 'Connected' | 'Listening' | 'Speaking'>('Disconnected');
 
-  const [logs, setLogs] = useState<{ t: string; level: Level; msg: string }[]>([]);
-  const pushLog = (level: Level, msg: string) => setLogs((p) => [...p, { t: nowStr(), level, msg }]);
-
-  const logEndRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  // CHAT-ONLY display
+  const [chat, setChat] = useState<ChatItem[]>([]);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chat]);
 
   const wsBase = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -48,28 +44,8 @@ export default function Page() {
   const wsRef = useRef<WebSocket | null>(null);
   const startedRef = useRef(false);
 
-  // client-side frame buffer so we never “miss” mic audio before WS opens
+  // client-side buffer for mic frames (so we don't lose them before WS opens)
   const pendingFramesRef = useRef<ArrayBuffer[]>([]);
-  const micBytesThisSecRef = useRef(0);
-  const sentBytesThisSecRef = useRef(0);
-  const meterTimerRef = useRef<number | null>(null);
-
-  function startMeter() {
-    stopMeter();
-    meterTimerRef.current = window.setInterval(() => {
-      const micB = micBytesThisSecRef.current;
-      const netB = sentBytesThisSecRef.current;
-      micBytesThisSecRef.current = 0;
-      sentBytesThisSecRef.current = 0;
-      pushLog('info', `meter: mic=${micB} B/s → ws=${netB} B/s`);
-    }, 1000);
-  }
-  function stopMeter() {
-    if (meterTimerRef.current != null) {
-      clearInterval(meterTimerRef.current);
-      meterTimerRef.current = null;
-    }
-  }
 
   async function ensureAudioGraph() {
     if (audioRef.current) return;
@@ -77,21 +53,16 @@ export default function Page() {
     const ac = new AC({ sampleRate: 48000 });
 
     await ac.audioWorklet.addModule('/worklets/pcm-processor.js');
-    pushLog('ok', 'worklet loaded: pcm-processor');
     await ac.audioWorklet.addModule('/worklets/pcm-player.js');
-    pushLog('ok', 'worklet loaded: pcm-player');
 
     const player = new AudioWorkletNode(ac, 'pcm-player', { numberOfOutputs: 1, outputChannelCount: [1] });
     player.connect(ac.destination);
 
     audioRef.current = ac;
     playerNodeRef.current = player;
-    pushLog('ok', 'worklet nodes created');
-
-    ac.onstatechange = () => pushLog('info', `AudioContext state → ${ac.state}`);
   }
 
-  // --- Resample PCM16@16k → Float32@ctxRate (linear) ---
+  // resample PCM16@16k → Float32@ctxRate
   function resamplePcm16ToF32(pcm16: Int16Array, inRate: number, outRate: number): Float32Array {
     if (inRate === outRate) {
       const out = new Float32Array(pcm16.length);
@@ -121,7 +92,6 @@ export default function Page() {
     await ensureAudioGraph();
     const ac = audioRef.current!;
     if (ac.state === 'suspended') await ac.resume();
-    pushLog('info', `AudioContext ready @ ${ac.sampleRate} Hz`);
 
     // mic
     let stream: MediaStream;
@@ -130,36 +100,26 @@ export default function Page() {
         audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true },
         video: false,
       });
-      pushLog('ok', 'mic granted');
     } catch (e: any) {
-      pushLog('error', `No mic: ${e?.message || e}`);
       startedRef.current = false;
       return;
     }
 
-    // mic → encoder (16k / 20ms)
+    // mic → encoder (16k/20ms)
     const mic = ac.createMediaStreamSource(stream);
     const enc = new AudioWorkletNode(ac, 'pcm-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
 
-    // hook encoder OUTPUT **before** we open WS; buffer frames
     enc.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
       const buf = ev.data;
-      micBytesThisSecRef.current += (buf?.byteLength || 0);
-      // If socket is open, flush any backlog + this frame
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        // flush backlog first
+        // flush backlog then send this frame
         if (pendingFramesRef.current.length) {
-          let flushed = 0, bytes = 0;
-          for (const f of pendingFramesRef.current) {
-            try { ws.send(f); sentBytesThisSecRef.current += f.byteLength; flushed++; bytes += f.byteLength; } catch {}
-          }
+          for (const f of pendingFramesRef.current) try { ws.send(f); } catch {}
           pendingFramesRef.current.length = 0;
-          pushLog('info', `flushed pending frames → ${flushed} (${bytes} B)`);
         }
-        try { ws.send(buf); sentBytesThisSecRef.current += buf.byteLength; } catch {}
+        try { ws.send(buf); } catch {}
       } else {
-        // keep up to ~5s of 20ms frames = 250 frames
         if (pendingFramesRef.current.length >= 250) pendingFramesRef.current.shift();
         pendingFramesRef.current.push(buf);
       }
@@ -177,63 +137,45 @@ export default function Page() {
     ws.onopen = () => {
       setConnected(true);
       setUiState('Connected');
-      pushLog('ok', `WS open ${url}`);
-      startMeter();
 
-      // tell server voice selection (server ignores if not needed)
+      // let server know which voice to use (if you want per-voice route; server ignores otherwise)
       try { ws.send(JSON.stringify({ type: 'start', voiceId })); } catch {}
 
-      // flush whatever frames we buffered locally while opening
+      // flush buffered mic frames captured while opening
       if (pendingFramesRef.current.length) {
-        let flushed = 0, bytes = 0;
-        for (const f of pendingFramesRef.current) {
-          try { ws.send(f); sentBytesThisSecRef.current += f.byteLength; flushed++; bytes += f.byteLength; } catch {}
-        }
+        for (const f of pendingFramesRef.current) try { ws.send(f); } catch {}
         pendingFramesRef.current.length = 0;
-        pushLog('info', `initial flush → ${flushed} frames (${bytes} B)`);
       }
     };
 
     ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'state') {
-            setUiState(msg.state);
-            pushLog('info', `state → ${msg.state}`);
-          } else if (msg.type === 'transcript') {
-            const text =
-              msg.text ?? msg.payload?.text ?? msg.payload?.transcript ?? msg.payload?.content ?? '';
-            if (text) pushLog('info', `asr: ${text}`);
-          } else if (msg.type === 'status') {
-            pushLog('info', `status: ${msg.text || JSON.stringify(msg)}`);
-          } else if (msg.type === 'error') {
-            pushLog('error', `upstream: ${msg.error?.message || 'unknown'}`);
-          } else {
-            pushLog('info', `msg: ${ev.data}`);
-          }
-        } catch {
-          pushLog('info', `msg: ${ev.data}`);
-        }
+      // binary → audio
+      if (typeof ev.data !== 'string') {
+        const pcm16 = new Int16Array(ev.data as ArrayBuffer);
+        const outRate = audioRef.current?.sampleRate || 48000;
+        const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
+        playerNodeRef.current?.port.postMessage(f32.buffer, [f32.buffer]);
         return;
       }
 
-      // Binary = TTS PCM16@16k → resample to ctx rate → player
-      const pcm16 = new Int16Array(ev.data as ArrayBuffer);
-      const outRate = audioRef.current?.sampleRate || 48000;
-      const f32 = resamplePcm16ToF32(pcm16, 16000, outRate);
-      playerNodeRef.current?.port.postMessage(f32.buffer, [f32.buffer]);
+      // JSON
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'chat') {
+          setChat((p) => [...p, { who: msg.who === 'Agent' ? 'Agent' : 'User', text: String(msg.text || '') }]);
+        } else if (msg.type === 'state') {
+          // optional: reflect DG state machine if you wire it up server-side
+          setUiState(msg.state);
+        }
+      } catch {
+        // ignore any non-JSON or stray text
+      }
     };
 
-    ws.onerror = (e: any) => {
-      pushLog('error', `WS error: ${e?.message || 'unknown'}`);
-    };
-
-    ws.onclose = (ev) => {
-      pushLog('warn', `WS closed (code=${ev.code}, reason="${ev.reason}")`);
+    ws.onerror = () => {};
+    ws.onclose = () => {
       setConnected(false);
       setUiState('Disconnected');
-      stopMeter();
       stopVoice(); // ensure cleanup
     };
 
@@ -249,28 +191,18 @@ export default function Page() {
     if (micNodeRef.current) { try { micNodeRef.current.disconnect(); } catch {} micNodeRef.current = null; }
 
     pendingFramesRef.current.length = 0;
-    stopMeter();
-
     startedRef.current = false;
     setConnected(false);
     setUiState('Disconnected');
   }
 
-  const start = () => { startVoice().catch((e) => pushLog('error', String(e))); };
+  const start = () => { startVoice().catch(() => {}); };
   const stop = () => { stopVoice(); };
 
   return (
     <main className="min-h-screen bg-black text-neutral-100">
       <div className="mx-auto w-full max-w-[1150px] px-4 py-6">
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
-          <div
-            className="pointer-events-none absolute inset-0 rounded-[24px] opacity-25"
-            style={{
-              background:
-                'radial-gradient(700px 220px at -140px -60px, rgba(255,199,0,0.08), transparent 60%), radial-gradient(700px 240px at 120% -10%, rgba(0,180,255,0.08), transparent 60%)',
-            }}
-          />
-
           <div className="relative flex items-center justify-end px-7 pt-4">
             <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800/80'}`}>
               {uiState}
@@ -302,6 +234,7 @@ export default function Page() {
                 </button>
               </div>
 
+              {/* Voices */}
               <div className="w-full max-w-[860px]">
                 <h3 className="mb-2 text-center text-[16px] font-semibold text-amber-100">Choose a voice to sample</h3>
                 <div className="grid grid-cols-3 gap-4">
@@ -338,34 +271,37 @@ export default function Page() {
               </div>
             </section>
 
-            {/* RIGHT: logs */}
+            {/* RIGHT: chat pane */}
             <section className="flex justify-center">
               <div className="flex h-[520px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl border border-neutral-800 bg-[#121216]/90">
                 <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
                   <h2 className="text-base font-semibold">Conversation</h2>
                   <span className="text-xs text-neutral-400">
-                    {logs.length} {logs.length === 1 ? 'event' : 'events'}
+                    {chat.length} {chat.length === 1 ? 'message' : 'messages'}
                   </span>
                 </header>
-                <div className="flex-1 overflow-y-auto px-4 py-3">
-                  {logs.length === 0 ? (
+                <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+                  {chat.length === 0 ? (
                     <p className="select-none text-neutral-400">
                       Click <span className="font-semibold text-amber-300">Speak with AI Assistant</span> to start.
                     </p>
                   ) : (
-                    <ul className="space-y-1">
-                      {logs.map((l, i) => (
-                        <li key={i} className="font-mono text-xs">
-                          <span className="mr-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-300">
-                            {l.t}
-                          </span>
-                          <LevelPill level={l.level as any} />
-                          <span className="ml-2 break-words">{l.msg}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    chat.map((m, i) => (
+                      <div
+                        key={i}
+                        className={
+                          'rounded-lg px-3 py-2 text-sm ' +
+                          (m.who === 'Agent'
+                            ? 'bg-neutral-800/70 border border-neutral-700'
+                            : 'bg-emerald-900/40 border border-emerald-800/70')
+                        }
+                      >
+                        <div className="mb-0.5 text-[11px] uppercase tracking-wide opacity-70">{m.who}</div>
+                        <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                      </div>
+                    ))
                   )}
-                  <div ref={logEndRef} />
+                  <div ref={chatEndRef} />
                 </div>
                 <footer className="border-t border-neutral-800 px-4 py-2 text-[11px] text-neutral-400">
                   Live voice via Deepgram. State: {uiState}.
@@ -385,34 +321,8 @@ export default function Page() {
               Stop
             </button>
           </div>
-
-          <details className="mx-7 mb-5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 open:pb-5">
-            <summary className="cursor-pointer text-sm text-neutral-300">Advanced</summary>
-            <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-neutral-300">
-              <div className="rounded-lg border border-neutral-800 p-3">
-                <div className="text-neutral-400">/audio-stream</div>
-                <div className="mt-1 font-mono text-xs">
-                  state: <span className="font-semibold">{connected ? 'OPEN' : 'CLOSED'}</span>
-                </div>
-              </div>
-              <a
-                href="/healthz"
-                target="_blank"
-                rel="noreferrer"
-                className="col-span-2 inline-flex items-center justify-center rounded-lg border border-neutral-800 px-3 py-2 text-center text-sm font-medium hover:bg-neutral-800"
-              >
-                Check /healthz
-              </a>
-            </div>
-          </details>
         </div>
       </div>
     </main>
   );
-}
-
-function LevelPill({ level }: { level: 'info' | 'ok' | 'warn' | 'error' }) {
-  const color =
-    level === 'info' ? 'bg-sky-700' : level === 'ok' ? 'bg-emerald-700' : level === 'warn' ? 'bg-amber-700' : 'bg-rose-700';
-  return <span className={`rounded px-1.5 py-0.5 text-[10px] ${color}`}>{level.toUpperCase()}</span>;
 }
