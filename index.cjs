@@ -9,6 +9,7 @@ const PORT = Number(process.env.PORT || 10000);
 const dev = process.env.NODE_ENV !== "production";
 
 function jlog(level, evt, extra = {}) {
+  // keep logs single-line JSON for Render
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, evt, ...extra }));
 }
 
@@ -20,7 +21,7 @@ function jlog(level, evt, extra = {}) {
   const ex = express();
   ex.set("trust proxy", true);
 
-  // tiny request logger (structured)
+  // tiny request logger
   ex.use((req, res, nextMw) => {
     const start = Date.now();
     res.on("finish", () => {
@@ -34,20 +35,28 @@ function jlog(level, evt, extra = {}) {
     nextMw();
   });
 
-  // health
+  // health first
   ex.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
 
-  // public assets (voices, worklets)
-  ex.use(express.static(path.join(__dirname, "public"), { maxAge: "1y", index: false }));
+  // static assets (no directory index)
+  const pubDir = path.join(__dirname, "public");
+  ex.use(express.static(pubDir, { maxAge: "1y", index: false }));
+  jlog("info", "static_mounted", { dir: pubDir });
 
-  // Next routes
-  ex.all("*", (req, res) => handle(req, res));
+  // Hand off everything else to Next **without** using "*" (avoid path-to-regexp v6 wildcard issues)
+  ex.use((req, res) => handle(req, res));
+  // Alternatively, you could do:
+  // ex.all("/*", (req, res) => handle(req, res));
+  jlog("info", "next_handler_mounted", { pattern: "middleware_fallback" });
 
   const server = http.createServer(ex);
 
-  // WebSocket bridges
-  setupWebDemoLive(server, { route: "/audio-stream" });
-  setupWebDemoLive(server, { route: "/web-demo/ws" });
+  // WebSocket bridges (mounted on the HTTP server's 'upgrade')
+  const wsRoute1 = "/audio-stream";
+  const wsRoute2 = "/web-demo/ws";
+  setupWebDemoLive(server, { route: wsRoute1 });
+  setupWebDemoLive(server, { route: wsRoute2 });
+  jlog("info", "ws_routes_mounted", { routes: [wsRoute1, wsRoute2] });
 
   server.listen(PORT, () => {
     jlog("info", "server_listen", { port: PORT, dev });
