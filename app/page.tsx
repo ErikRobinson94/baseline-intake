@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link'; // 👈 added
 
 type ChatItem = { who: 'User' | 'Agent'; text: string };
 
@@ -138,10 +139,8 @@ export default function Page() {
       setConnected(true);
       setUiState('Connected');
 
-      // let server know which voice to use (if you want per-voice route; server ignores otherwise)
       try { ws.send(JSON.stringify({ type: 'start', voiceId })); } catch {}
 
-      // flush buffered mic frames captured while opening
       if (pendingFramesRef.current.length) {
         for (const f of pendingFramesRef.current) try { ws.send(f); } catch {}
         pendingFramesRef.current.length = 0;
@@ -149,7 +148,6 @@ export default function Page() {
     };
 
     ws.onmessage = (ev) => {
-      // binary → audio
       if (typeof ev.data !== 'string') {
         const pcm16 = new Int16Array(ev.data as ArrayBuffer);
         const outRate = audioRef.current?.sampleRate || 48000;
@@ -158,13 +156,11 @@ export default function Page() {
         return;
       }
 
-      // JSON
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'chat') {
           setChat((p) => [...p, { who: msg.who === 'Agent' ? 'Agent' : 'User', text: String(msg.text || '') }]);
         } else if (msg.type === 'state') {
-          // optional: reflect DG state machine if you wire it up server-side
           setUiState(msg.state);
         }
       } catch {
@@ -176,7 +172,7 @@ export default function Page() {
     ws.onclose = () => {
       setConnected(false);
       setUiState('Disconnected');
-      stopVoice(); // ensure cleanup
+      stopVoice();
     };
 
     wsRef.current = ws;
@@ -203,10 +199,15 @@ export default function Page() {
     <main className="min-h-screen bg-black text-neutral-100">
       <div className="mx-auto w-full max-w-[1150px] px-4 py-6">
         <div className="relative rounded-[24px] border border-neutral-800/80 bg-[#0b0b0f]/75 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_48px_rgba(0,0,0,0.5)]">
+          
+          {/* 🔽 swapped status chip for link button */}
           <div className="relative flex items-center justify-end px-7 pt-4">
-            <span className={`rounded-full px-3 py-1 text-xs ${connected ? 'bg-emerald-600/90' : 'bg-neutral-800/80'}`}>
-              {uiState}
-            </span>
+            <Link
+              href="/chat"
+              className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-sm font-semibold text-black hover:bg-amber-400 transition"
+            >
+              Go to Case Management Chat →
+            </Link>
           </div>
 
           <div className="relative grid grid-cols-1 gap-5 px-7 pb-5 pt-1 md:grid-cols-[1.35fr_0.9fr]">
