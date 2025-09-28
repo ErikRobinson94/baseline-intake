@@ -277,6 +277,7 @@ export default function ChatPage() {
           <footer className="border-t border-neutral-800/70 px-5 py-4">
             <div className="flex items-end gap-3">
               <button
+                type="button"
                 onClick={toggleMic}
                 className={`flex h-10 w-10 items-center justify-center rounded-full border transition ${
                   micOn
@@ -305,6 +306,7 @@ export default function ChatPage() {
                   <div className="flex items-center justify-between pt-2">
                     <div className="text-[11px] text-neutral-500">Enter to send • Shift+Enter for newline</div>
                     <button
+                      type="button"
                       onClick={sendText}
                       className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-sm font-semibold text-black hover:bg-amber-400"
                     >
@@ -326,14 +328,18 @@ export default function ChatPage() {
  * =======================*/
 
 function ToolbarBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  const { className, children, type, ...rest } = props;
   return (
     <button
-      {...props}
+      type={type ?? 'button'}
+      {...rest}
       className={
-        'rounded-md border border-neutral-800 bg-neutral-950/60 px-2 py-1 text-[12px] ' +
-        'text-neutral-200 hover:border-neutral-700'
+        'rounded-md border border-neutral-800 bg-neutral-950/60 px-2 py-1 text-[12px] text-neutral-200 hover:border-neutral-700 ' +
+        (className ?? '')
       }
-    />
+    >
+      {children}
+    </button>
   );
 }
 
@@ -465,6 +471,7 @@ function ActivityCard({
             )}
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() =>
                   onSaveEdit(msg.id, {
                     title: draftTitle,
@@ -477,6 +484,7 @@ function ActivityCard({
                 Save
               </button>
               <button
+                type="button"
                 onClick={() => onToggleEdit(msg.id)}
                 className="rounded-md border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-[12px]"
               >
@@ -489,9 +497,7 @@ function ActivityCard({
             <div className="text-[13px] font-semibold mb-1">{msg.title}</div>
             <div className="whitespace-pre-wrap text-sm text-neutral-200">{msg.body}</div>
             {msg.activityType === 'call' && (
-              <div className="mt-2 text-[12px] text-neutral-400">
-                (Will create a time entry on Approve.)
-              </div>
+              <div className="mt-2 text-[12px] text-neutral-400">(Will create a time entry on Approve.)</div>
             )}
           </>
         )}
@@ -499,6 +505,7 @@ function ActivityCard({
         {/* Actions */}
         <div className="mt-3 flex flex-wrap gap-2">
           <button
+            type="button"
             onClick={() => onApprove(msg.id)}
             disabled={msg.status === 'approved' || msg.status === 'discarded'}
             className={
@@ -511,6 +518,7 @@ function ActivityCard({
             Approve
           </button>
           <button
+            type="button"
             onClick={() => onToggleEdit(msg.id)}
             disabled={msg.status === 'discarded'}
             className={
@@ -523,6 +531,7 @@ function ActivityCard({
             {msg._editing ? 'Editing…' : 'Edit'}
           </button>
           <button
+            type="button"
             onClick={() => onDiscard(msg.id)}
             disabled={msg.status === 'discarded'}
             className={
@@ -557,6 +566,7 @@ function ChipPicker({
   return (
     <div className="relative">
       <button
+        type="button"
         onClick={() => setOpen((o) => !o)}
         className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-950/70 px-2 py-1"
       >
@@ -572,6 +582,7 @@ function ChipPicker({
             {items.map((it) => (
               <li key={it.id}>
                 <button
+                  type="button"
                   onClick={() => {
                     onPick(it.id);
                     setOpen(false);
